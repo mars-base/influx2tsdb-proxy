@@ -200,7 +200,9 @@
         },
         "fieldConfig": {
           "defaults": {
+            "min": 0,
             "thresholds": {
+              "mode": "absolute",
               "steps": [
                 {
                   "color": "green",
@@ -234,7 +236,7 @@
               "lastNotNull"
             ],
             "fields": "",
-            "values": false
+            "values": true
           },
           "showUnfilled": true
         },
