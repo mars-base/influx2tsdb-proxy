@@ -14,10 +14,11 @@ type Converter struct {
 	dbName string
 	fromMs int64
 	toMs   int64
+	epoch  string // "ms" for millisecond timestamps, empty for RFC3339
 }
 
-func NewConverter(meta *MetaStore, dbName string, fromMs, toMs int64) *Converter {
-	return &Converter{meta: meta, dbName: dbName, fromMs: fromMs, toMs: toMs}
+func NewConverter(meta *MetaStore, dbName string, fromMs, toMs int64, epoch string) *Converter {
+	return &Converter{meta: meta, dbName: dbName, fromMs: fromMs, toMs: toMs, epoch: epoch}
 }
 
 // Convert parses an InfluxQL query and returns an InfluxDB-compatible response
@@ -539,6 +540,19 @@ func (c *Converter) convertWhere(where string) string {
 		w = strings.ReplaceAll(w, "$timeFilter", timeFilter)
 	}
 
+	// Replace epoch millisecond literals: 1787221389201ms -> timestamp
+	// Grafana sends time comparisons like: time > 1787221389201ms
+	reEpochMs := regexp.MustCompile(`(\d+)ms`)
+	w = reEpochMs.ReplaceAllStringFunc(w, func(match string) string {
+		m := reEpochMs.FindStringSubmatch(match)
+		if len(m) < 2 {
+			return match
+		}
+		var ms int64
+		fmt.Sscanf(m[1], "%d", &ms)
+		return fmt.Sprintf("'%s'", time.UnixMilli(ms).UTC().Format(time.RFC3339))
+	})
+
 	// Replace: time > now() - Xs -> time > NOW() - interval 'X seconds'
 	w = replaceTimeComparisons(w)
 
@@ -607,7 +621,7 @@ func (c *Converter) executeAndFormat(sql string, measurement string, groupByTags
 		valueColAliases = valueColNames
 	}
 
-	result := buildInfluxResult(measurement, allRows, colNames, groupByTags, valueColNames, valueColAliases)
+	result := buildInfluxResult(measurement, allRows, colNames, groupByTags, valueColNames, valueColAliases, c.epoch)
 
 	return &InfluxDBResponse{
 		Results: []InfluxDBResult{result},

@@ -42,7 +42,7 @@ func HandleQuery(dbName string, meta *MetaStore) http.HandlerFunc {
 
 		log.Printf("[QUERY] q=%s epoch=%s from=%d to=%d", queryStr, epoch, fromMs, toMs)
 
-		conv := NewConverter(meta, dbName, fromMs, toMs)
+		conv := NewConverter(meta, dbName, fromMs, toMs, epoch)
 		result, err := conv.Convert(queryStr)
 		if err != nil {
 			log.Printf("[QUERY ERROR] %v", err)
@@ -196,8 +196,9 @@ func extractMeasurement(query string) string {
 }
 
 // buildInfluxResult converts SQL rows into InfluxDB response format,
-// grouping by tag columns into separate series
-func buildInfluxResult(measurement string, rows []map[string]interface{}, colNames []string, tagCols []string, valueColNames []string, valueColAliases []string) InfluxDBResult {
+// grouping by tag columns into separate series.
+// epoch controls time format: "ms" returns epoch milliseconds, "" returns RFC3339.
+func buildInfluxResult(measurement string, rows []map[string]interface{}, colNames []string, tagCols []string, valueColNames []string, valueColAliases []string, epoch string) InfluxDBResult {
 	if len(rows) == 0 {
 		return InfluxDBResult{StatementID: 0}
 	}
@@ -205,7 +206,6 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 	// Check if time column exists and has valid values
 	hasTime := false
 	if _, ok := rows[0]["time"]; ok {
-		// Check if at least one row has a non-nil time
 		for _, row := range rows {
 			if row["time"] != nil {
 				hasTime = true
@@ -214,22 +214,24 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 		}
 	}
 
+	// Fallback time when no time column: use epoch ms or RFC3339 depending on epoch param
+	fallbackTime := formatTimeValue(time.Now().UTC(), epoch)
+
 	if len(tagCols) == 0 {
 		// No tag grouping: single series
-		columns := make([]string, 0)
-		if hasTime {
-			columns = append(columns, "time")
-		}
+		columns := []string{"time"}
 		columns = append(columns, valueColAliases...)
 
 		values := make([][]interface{}, 0, len(rows))
 		for _, row := range rows {
-			valRow := make([]interface{}, 0)
+			valRow := make([]interface{}, 0, 1+len(valueColNames))
 			if hasTime {
-				valRow = append(valRow, formatTime(row["time"]))
+				valRow = append(valRow, formatTimeValue(row["time"], epoch))
+			} else {
+				valRow = append(valRow, fallbackTime)
 			}
 			for _, col := range valueColNames {
-				valRow = append(valRow, row[col])
+				valRow = append(valRow, normalizeValue(row[col]))
 			}
 			values = append(values, valRow)
 		}
@@ -261,10 +263,7 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 			for i, tc := range tagCols {
 				tags[tc] = tagVals[i]
 			}
-			columns := make([]string, 0)
-			if hasTime {
-				columns = append(columns, "time")
-			}
+			columns := []string{"time"}
 			columns = append(columns, valueColAliases...)
 
 			series = &InfluxDBSeries{
@@ -276,12 +275,14 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 			seriesOrder = append(seriesOrder, key)
 		}
 
-		valRow := make([]interface{}, 0)
+		valRow := make([]interface{}, 0, 1+len(valueColNames))
 		if hasTime {
-			valRow = append(valRow, formatTime(row["time"]))
+			valRow = append(valRow, formatTimeValue(row["time"], epoch))
+		} else {
+			valRow = append(valRow, fallbackTime)
 		}
 		for _, col := range valueColNames {
-			valRow = append(valRow, row[col])
+			valRow = append(valRow, normalizeValue(row[col]))
 		}
 		series.Values = append(series.Values, valRow)
 	}
@@ -297,7 +298,39 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 	}
 }
 
-// formatTime converts a time value to ISO 8601 string
+// formatTimeValue converts a time value to the appropriate format based on epoch parameter.
+// When epoch="ms", returns epoch milliseconds as float64 (for JSON numeric serialization).
+// Otherwise returns RFC3339Nano string.
+func formatTimeValue(v interface{}, epoch string) interface{} {
+	var t time.Time
+	switch tv := v.(type) {
+	case time.Time:
+		t = tv
+	case string:
+		// Already formatted string, return as-is unless epoch ms requested
+		if epoch == "ms" {
+			if parsed, err := time.Parse(time.RFC3339Nano, tv); err == nil {
+				return float64(parsed.UnixMilli())
+			}
+			return tv
+		}
+		return tv
+	default:
+		if epoch == "ms" {
+			if parsed, err := time.Parse(time.RFC3339Nano, fmt.Sprintf("%v", v)); err == nil {
+				return float64(parsed.UnixMilli())
+			}
+		}
+		return fmt.Sprintf("%v", v)
+	}
+
+	if epoch == "ms" {
+		return float64(t.UnixMilli())
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// formatTime converts a time value to ISO 8601 string (kept for backward compat)
 func formatTime(v interface{}) string {
 	switch t := v.(type) {
 	case time.Time:
