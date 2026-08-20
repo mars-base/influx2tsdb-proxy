@@ -440,6 +440,11 @@ func (c *Converter) buildOuterSQL(outer selectQuery, innerSQL string, inner sele
 		sql.WriteString(fmt.Sprintf(`"%s", `, tag))
 	}
 
+	// When inner has GROUP BY time but outer doesn't aggregate, pass through time column
+	if inner.groupByTime != "" && outer.groupByTime == "" && !c.hasAggregation(outer.fields) {
+		sql.WriteString("time, ")
+	}
+
 	// Convert outer fields
 	outerFields := c.convertOuterFields(outer.fields, inner)
 	sql.WriteString(strings.Join(outerFields, ", "))

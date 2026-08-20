@@ -214,8 +214,13 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 		}
 	}
 
-	// Fallback time when no time column: use epoch ms or RFC3339 depending on epoch param
-	fallbackTime := formatTimeValue(time.Now().UTC(), epoch)
+	// Fallback time when no time column: real InfluxDB returns 0 for non-time-grouped queries
+	var fallbackTime interface{}
+	if epoch == "ms" {
+		fallbackTime = float64(0)
+	} else {
+		fallbackTime = "1970-01-01T00:00:00Z"
+	}
 
 	if len(tagCols) == 0 {
 		// No tag grouping: single series
@@ -299,7 +304,7 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 }
 
 // formatTimeValue converts a time value to the appropriate format based on epoch parameter.
-// When epoch="ms", returns epoch milliseconds as float64 (for JSON numeric serialization).
+// When epoch="ms", returns epoch milliseconds as float64 (matching real InfluxDB behavior).
 // Otherwise returns RFC3339Nano string.
 func formatTimeValue(v interface{}, epoch string) interface{} {
 	var t time.Time
@@ -307,7 +312,6 @@ func formatTimeValue(v interface{}, epoch string) interface{} {
 	case time.Time:
 		t = tv
 	case string:
-		// Already formatted string, return as-is unless epoch ms requested
 		if epoch == "ms" {
 			if parsed, err := time.Parse(time.RFC3339Nano, tv); err == nil {
 				return float64(parsed.UnixMilli())
