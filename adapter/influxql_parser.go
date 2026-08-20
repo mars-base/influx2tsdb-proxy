@@ -274,6 +274,8 @@ func (c *Converter) buildSimpleSQL(q selectQuery) string {
 	} else if q.hasLast || q.hasFirst {
 		// For last/first, include time column
 		sql.WriteString("time, ")
+	} else if c.hasAggregation(q.fields) {
+		// Pure aggregation (with or without tag GROUP BY): skip time column
 	} else {
 		sql.WriteString("time, ")
 	}
@@ -317,6 +319,13 @@ func (c *Converter) buildSimpleSQL(q selectQuery) string {
 		}
 		sql.WriteString(fmt.Sprintf(" GROUP BY %s", strings.Join(groupCols, ", ")))
 		sql.WriteString(" ORDER BY time")
+	} else if len(q.groupByTags) > 0 && c.hasAggregation(q.fields) {
+		// Aggregation with tag GROUP BY but no time bucket
+		tagCols := make([]string, len(q.groupByTags))
+		for i, tag := range q.groupByTags {
+			tagCols[i] = fmt.Sprintf(`"%s"`, tag)
+		}
+		sql.WriteString(fmt.Sprintf(" GROUP BY %s", strings.Join(tagCols, ", ")))
 	}
 
 	// LIMIT
@@ -367,6 +376,17 @@ func (c *Converter) convertFields(fields []string, groupByTime string) []string 
 		result = append(result, converted)
 	}
 	return result
+}
+
+// hasAggregation checks if any field contains an aggregation function
+func (c *Converter) hasAggregation(fields []string) bool {
+	reAgg := regexp.MustCompile(`(?i)\b(mean|avg|sum|count|max|min|last|first|median|stddev|spread)\s*\(`)
+	for _, f := range fields {
+		if reAgg.MatchString(f) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Converter) convertField(field string, groupByTime string) string {

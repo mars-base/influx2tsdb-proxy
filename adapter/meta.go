@@ -100,6 +100,12 @@ func (m *MetaStore) EnsureTable(measurement string, tags map[string]string, fiel
 			m.pool.Exec(m.ctx,
 				"INSERT INTO _influx_meta (measurement, column_name, column_type) VALUES ($1, $2, 'tag') ON CONFLICT DO NOTHING",
 				measurement, tagName)
+			// Add column to existing table
+			if exists {
+				m.pool.Exec(m.ctx,
+					fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN IF NOT EXISTS "%s" TEXT`,
+						escapeIdent(measurement), escapeIdent(tagName)))
+			}
 		}
 	}
 
@@ -111,6 +117,12 @@ func (m *MetaStore) EnsureTable(measurement string, tags map[string]string, fiel
 			m.pool.Exec(m.ctx,
 				"INSERT INTO _influx_meta (measurement, column_name, column_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
 				measurement, fieldName, colType)
+			// Add column to existing table
+			if exists {
+				m.pool.Exec(m.ctx,
+					fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN IF NOT EXISTS "%s" DOUBLE PRECISION`,
+						escapeIdent(measurement), escapeIdent(fieldName)))
+			}
 		}
 	}
 
