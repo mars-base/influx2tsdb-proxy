@@ -14,6 +14,11 @@ Grafana can use InfluxDB datasource to query TimescaleDB data transparently.
 - TimescaleDB extension auto-detection and creation
 - Cross-platform builds (Linux / macOS / Windows, amd64 + arm64)
 
+## Requirements
+
+- Go 1.21+
+- PostgreSQL with TimescaleDB extension (auto-created if missing)
+
 ## Architecture
 
 ```
@@ -28,29 +33,14 @@ Grafana (InfluxDB datasource)
     pgxpool → TimescaleDB
 ```
 
-## Build
-
-```bash
-# Current platform
-make build
-
-# Linux amd64
-make linux
-
-# All platforms (linux/darwin/windows, amd64+arm64)
-make cross
-```
-
-Binary output: `build/influx2tsdb-proxy`
-
 ## Usage
 
 ```bash
 # Required: PostgreSQL/TimescaleDB connection string
-./build/influx2tsdb-proxy -pg "postgres://user:pass@host:port/db?sslmode=disable"
+influx2tsdb-proxy -pg "postgres://user:pass@host:port/db?sslmode=disable"
 
 # Optional flags
-./build/influx2tsdb-proxy \
+influx2tsdb-proxy \
   -pg "postgres://user:pass@host:port/db?sslmode=disable" \
   -port 8087 \
   -pool 10
@@ -101,29 +91,20 @@ SELECT sum(val) FROM (
 ) t
 ```
 
-## Project Structure
+## Build
 
-```
-├── main.go                    # Entry point, flags, connection, HTTP server
-├── adapter/
-│   ├── handler_ping.go        # /ping, /debug/vars
-│   ├── handler_write.go       # /write — Line Protocol → TimescaleDB
-│   ├── handler_query.go       # /query — InfluxQL entry point
-│   ├── influxql_parser.go     # InfluxQL → SQL translator
-│   ├── line_protocol.go       # Line Protocol parser
-│   ├── meta.go                # Metadata store, auto table creation
-│   └── response.go            # InfluxDB JSON response types
-├── docs/
-│   └── influxdb-1.x-tsdb-proxy.md  # Design document
-├── Makefile
-├── go.mod
-└── go.sum
+```bash
+# Current platform
+make build
+
+# Linux amd64
+make linux
+
+# All platforms (linux/darwin/windows, amd64+arm64)
+make cross
 ```
 
-## Requirements
-
-- Go 1.21+
-- PostgreSQL with TimescaleDB extension (auto-created if missing)
+Binary output: `build/influx2tsdb-proxy`
 
 ## License
 

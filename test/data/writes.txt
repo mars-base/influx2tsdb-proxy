@@ -1,0 +1,24 @@
+# Test write data - Line Protocol samples
+# Each line is one write test case: description | body | expected_status
+# Use ${MEASUREMENT} as placeholder for the test measurement name
+
+# 3a. Basic write with tags and timestamp
+basic_write|${MEASUREMENT},server_id=srv001,region=us-east online_count=3500i,cpu_usage=72.5 1755676800000000000|204
+
+# 3b. Write multiple lines
+multi_line|${MEASUREMENT},server_id=srv002,region=us-west online_count=2800i,cpu_usage=65.3 1755676800000000000\n${MEASUREMENT},server_id=srv003,region=eu-west online_count=1200i,cpu_usage=45.1 1755676800000000000\n${MEASUREMENT},server_id=srv001,region=us-east online_count=3600i,cpu_usage=74.2 1755676860000000000|204
+
+# 3c. Write with boolean field
+boolean_field|${MEASUREMENT},server_id=srv004,region=ap-east online_count=500i,cpu_usage=12.3,is_active=true 1755676920000000000|204
+
+# 3d. Write without timestamp
+no_timestamp|${MEASUREMENT},server_id=srv005,region=ap-east online_count=100i,cpu_usage=5.0|204
+
+# 3e. Invalid Line Protocol
+invalid_line|invalid_no_space_fields|400
+
+# 3f. Empty body
+empty_body||204
+
+# 3g. GET /write should fail (method check, not data)
+get_write_method||405

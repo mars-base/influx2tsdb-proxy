@@ -1,0 +1,46 @@
+# Test query data - InfluxQL queries
+# Each line: description | query | assert_pattern | assert_type
+# assert_type: contains (default)
+# Use ${MEASUREMENT} as placeholder, ${TIME_GT} for WHERE time filter
+
+# ============================================================
+# SHOW queries
+# ============================================================
+SHOW DATABASES has series|SHOW DATABASES|"series"|contains
+SHOW DATABASES returns db name|SHOW DATABASES|"tsdb"|contains
+SHOW MEASUREMENTS has series|SHOW MEASUREMENTS|"series"|contains
+SHOW MEASUREMENTS returns test measurement|SHOW MEASUREMENTS|${MEASUREMENT}|contains
+SHOW TAG KEYS has server_id|SHOW TAG KEYS FROM "${MEASUREMENT}"|server_id|contains
+SHOW TAG KEYS has region|SHOW TAG KEYS FROM "${MEASUREMENT}"|region|contains
+SHOW TAG VALUES has srv001|SHOW TAG VALUES FROM "${MEASUREMENT}" WITH KEY = "server_id"|srv001|contains
+SHOW TAG VALUES has srv002|SHOW TAG VALUES FROM "${MEASUREMENT}" WITH KEY = "server_id"|srv002|contains
+SHOW FIELD KEYS has online_count|SHOW FIELD KEYS FROM "${MEASUREMENT}"|online_count|contains
+SHOW FIELD KEYS has cpu_usage|SHOW FIELD KEYS FROM "${MEASUREMENT}"|cpu_usage|contains
+SHOW RETENTION POLICIES has autogen|SHOW RETENTION POLICIES|autogen|contains
+CREATE DATABASE returns result|CREATE DATABASE "testdb"|results|contains
+
+# ============================================================
+# SELECT queries - aggregations
+# ============================================================
+SELECT mean() GROUP BY time returns series|SELECT mean("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY time(1h)|"series"|contains
+SELECT mean() GROUP BY tag returns tags|SELECT mean("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY "server_id"|"tags"|contains
+SELECT mean() GROUP BY tag has server_id|SELECT mean("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY "server_id"|server_id|contains
+SELECT last() returns values|SELECT last("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY "server_id"|"values"|contains
+SELECT sum() returns values|SELECT sum("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}'|"values"|contains
+SELECT count() returns values|SELECT count("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}'|"values"|contains
+SELECT max() returns values|SELECT max("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}'|"values"|contains
+SELECT min() returns values|SELECT min("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}'|"values"|contains
+
+# ============================================================
+# Subqueries
+# ============================================================
+sum(last()) subquery returns values|SELECT sum("val") FROM (SELECT last("online_count") AS val FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY "server_id")|"values"|contains
+count(last()) subquery returns values|SELECT count("val") FROM (SELECT last("online_count") AS val FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY "server_id")|"values"|contains
+max(sum()) subquery returns values|SELECT max("total") FROM (SELECT sum("online_count") AS total FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY time(1h))|"values"|contains
+subquery with outer GROUP BY returns values|SELECT sum("val") FROM (SELECT last("online_count") AS val FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY "server_id","region") GROUP BY "region"|"values"|contains
+
+# ============================================================
+# Edge cases
+# ============================================================
+now() time comparison works|SELECT last("online_count") FROM "${MEASUREMENT}" WHERE time > now() - 1000000h|"values"|contains
+fill(null) does not error|SELECT mean("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY time(1h) fill(null)|results|contains

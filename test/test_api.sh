@@ -1,6 +1,10 @@
 #!/bin/bash
 # InfluxDB 1.x API Test Suite for influx2tsdb-proxy
 # Usage: ./test/test_api.sh [HOST:PORT]
+#
+# Test data is loaded from:
+#   test/data/writes.txt  - Line Protocol write cases
+#   test/data/queries.txt - InfluxQL query cases
 
 set -e
 
@@ -9,6 +13,10 @@ URL="http://$BASE"
 PASS=0
 FAIL=0
 SKIP=0
+
+# Resolve data directory relative to this script
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="$SCRIPT_DIR/data"
 
 # Colors
 RED='\033[0;31m'
@@ -19,6 +27,7 @@ NC='\033[0m'
 # Test measurement name (unique to avoid conflicts)
 TS=$(date +%s)
 MEASUREMENT="test_api_${TS}"
+TIME_GT="2025-08-20T00:00:00Z"
 
 pass() { echo -e "  ${GREEN}✓${NC} $1"; PASS=$((PASS+1)); }
 fail() { echo -e "  ${RED}✗${NC} $1"; FAIL=$((FAIL+1)); }
@@ -43,30 +52,12 @@ assert_contains() {
     fi
 }
 
-assert_json_value() {
-    local desc="$1" body="$2" jqpath="$3" expected="$4"
-    local actual
-    actual=$(echo "$body" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    val = d
-    for key in '$jqpath'.split('.'):
-        if key.isdigit():
-            val = val[int(key)]
-        elif key.startswith('['):
-            val = val[int(key.strip('[]'))]
-        else:
-            val = val[key]
-    print(val)
-except:
-    print('__ERROR__')
-" 2>/dev/null)
-    if [ "$actual" = "$expected" ]; then
-        pass "$desc"
-    else
-        fail "$desc (expected: $expected, got: $actual)"
-    fi
+# Expand ${MEASUREMENT} and ${TIME_GT} placeholders in a string
+expand_vars() {
+    local s="$1"
+    s="${s//\$\{MEASUREMENT\}/$MEASUREMENT}"
+    s="${s//\$\{TIME_GT\}/$TIME_GT}"
+    echo "$s"
 }
 
 # ============================================================
@@ -97,158 +88,81 @@ assert_contains "/debug/vars returns JSON object" "$BODY" "{"
 section "3. /write - Line Protocol"
 # ============================================================
 
-# 3a. Basic write with tags and timestamp
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" \
-    -d "${MEASUREMENT},server_id=srv001,region=us-east online_count=3500i,cpu_usage=72.5 1755676800000000000")
-assert_status "/write basic Line Protocol" "204" "$STATUS"
+if [ ! -f "$DATA_DIR/writes.txt" ]; then
+    fail "writes.txt not found: $DATA_DIR/writes.txt"
+else
+    while IFS='|' read -r desc body expected_status; do
+        # Skip comments and empty lines
+        [[ "$desc" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$desc" ]] && continue
 
-# 3b. Write multiple lines
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" \
-    -d "${MEASUREMENT},server_id=srv002,region=us-west online_count=2800i,cpu_usage=65.3 1755676800000000000
-${MEASUREMENT},server_id=srv003,region=eu-west online_count=1200i,cpu_usage=45.1 1755676800000000000
-${MEASUREMENT},server_id=srv001,region=us-east online_count=3600i,cpu_usage=74.2 1755676860000000000")
-assert_status "/write multiple lines" "204" "$STATUS"
+        # Expand variables
+        body=$(expand_vars "$body")
+        expected_status=$(echo "$expected_status" | tr -d '[:space:]')
 
-# 3c. Write with different field types
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" \
-    -d "${MEASUREMENT},server_id=srv004,region=ap-east online_count=500i,cpu_usage=12.3,is_active=true 1755676920000000000")
-assert_status "/write with boolean field" "204" "$STATUS"
+        # Special cases
+        if [ "$desc" = "empty_body" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" -d "")
+        elif [ "$desc" = "get_write_method" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/write?db=testdb")
+        else
+            # Handle \n as actual newlines for multi-line writes
+            body=$(echo -e "$body")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" -d "$body")
+        fi
 
-# 3d. Write without timestamp (server assigns)
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" \
-    -d "${MEASUREMENT},server_id=srv005,region=ap-east online_count=100i,cpu_usage=5.0")
-assert_status "/write without timestamp" "204" "$STATUS"
-
-# 3e. Invalid Line Protocol
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" \
-    -d "invalid_no_space_fields")
-assert_status "/write invalid Line Protocol returns 400" "400" "$STATUS"
-
-# 3f. Empty body
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" -d "")
-assert_status "/write empty body returns 204" "204" "$STATUS"
-
-# 3g. GET /write should fail
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/write?db=testdb")
-assert_status "GET /write returns 405" "405" "$STATUS"
+        assert_status "/write $desc" "$expected_status" "$STATUS"
+    done < "$DATA_DIR/writes.txt"
+fi
 
 # ============================================================
-section "4. /query - SHOW queries"
+section "4. /query - from queries.txt"
 # ============================================================
 
 # Wait a moment for writes to be visible
 sleep 1
 
-# 4a. SHOW DATABASES
-BODY=$(curl -s "$URL/query?q=SHOW%20DATABASES")
-assert_contains "SHOW DATABASES has series" "$BODY" '"series"'
-assert_contains "SHOW DATABASES returns db name" "$BODY" '"tsdb"'
+if [ ! -f "$DATA_DIR/queries.txt" ]; then
+    fail "queries.txt not found: $DATA_DIR/queries.txt"
+else
+    while IFS='|' read -r desc query pattern assert_type; do
+        # Skip comments and empty lines
+        [[ "$desc" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$desc" ]] && continue
 
-# 4b. SHOW MEASUREMENTS
-BODY=$(curl -s "$URL/query?q=SHOW%20MEASUREMENTS")
-assert_contains "SHOW MEASUREMENTS has series" "$BODY" '"series"'
-assert_contains "SHOW MEASUREMENTS returns test measurement" "$BODY" "$MEASUREMENT"
+        # Expand variables
+        query=$(expand_vars "$query")
+        pattern=$(expand_vars "$pattern")
+        assert_type=$(echo "$assert_type" | tr -d '[:space:]')
 
-# 4c. SHOW TAG KEYS
-BODY=$(curl -s "$URL/query?q=SHOW%20TAG%20KEYS%20FROM%20%22${MEASUREMENT}%22")
-assert_contains "SHOW TAG KEYS has server_id" "$BODY" "server_id"
-assert_contains "SHOW TAG KEYS has region" "$BODY" "region"
-
-# 4d. SHOW TAG VALUES
-BODY=$(curl -s "$URL/query?q=SHOW%20TAG%20VALUES%20FROM%20%22${MEASUREMENT}%22%20WITH%20KEY%20%3D%20%22server_id%22")
-assert_contains "SHOW TAG VALUES has srv001" "$BODY" "srv001"
-assert_contains "SHOW TAG VALUES has srv002" "$BODY" "srv002"
-
-# 4e. SHOW FIELD KEYS
-BODY=$(curl -s "$URL/query?q=SHOW%20FIELD%20KEYS%20FROM%20%22${MEASUREMENT}%22")
-assert_contains "SHOW FIELD KEYS has online_count" "$BODY" "online_count"
-assert_contains "SHOW FIELD KEYS has cpu_usage" "$BODY" "cpu_usage"
-
-# 4f. SHOW RETENTION POLICIES
-BODY=$(curl -s "$URL/query?q=SHOW%20RETENTION%20POLICIES")
-assert_contains "SHOW RETENTION POLICIES has autogen" "$BODY" "autogen"
-
-# 4g. CREATE DATABASE (no-op)
-BODY=$(curl -s "$URL/query?q=CREATE%20DATABASE%20%22testdb%22")
-assert_contains "CREATE DATABASE returns result" "$BODY" "results"
+        if [ "$assert_type" = "status" ]; then
+            # pattern is expected HTTP status code
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -G "$URL/query" --data-urlencode "q=$query")
+            assert_status "$desc" "$pattern" "$STATUS"
+        else
+            # default: contains
+            BODY=$(curl -s -G "$URL/query" --data-urlencode "q=$query")
+            assert_contains "$desc" "$BODY" "$pattern"
+        fi
+    done < "$DATA_DIR/queries.txt"
+fi
 
 # ============================================================
-section "5. /query - SELECT queries"
+section "5. /query - Edge cases"
 # ============================================================
 
-# 5a. Basic SELECT with aggregation
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT mean(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY time(1h)")
-assert_contains "SELECT mean() GROUP BY time returns series" "$BODY" '"series"'
-
-# 5b. SELECT with tag GROUP BY
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT mean(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY \"server_id\"")
-assert_contains "SELECT mean() GROUP BY tag returns tags" "$BODY" '"tags"'
-assert_contains "SELECT mean() GROUP BY tag has server_id" "$BODY" "server_id"
-
-# 5c. last() query
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT last(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY \"server_id\"")
-assert_contains "SELECT last() returns values" "$BODY" '"values"'
-
-# 5d. sum() query
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT sum(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z'")
-assert_contains "SELECT sum() returns values" "$BODY" '"values"'
-
-# 5e. count() query
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT count(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z'")
-assert_contains "SELECT count() returns values" "$BODY" '"values"'
-
-# 5f. max/min query
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT max(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z'")
-assert_contains "SELECT max() returns values" "$BODY" '"values"'
-
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT min(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z'")
-assert_contains "SELECT min() returns values" "$BODY" '"values"'
-
-# ============================================================
-section "6. /query - Subqueries"
-# ============================================================
-
-# 6a. sum(last()) subquery
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT sum(\"val\") FROM (SELECT last(\"online_count\") AS val FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY \"server_id\")")
-assert_contains "sum(last()) subquery returns values" "$BODY" '"values"'
-
-# 6b. count(last()) subquery
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT count(\"val\") FROM (SELECT last(\"online_count\") AS val FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY \"server_id\")")
-assert_contains "count(last()) subquery returns values" "$BODY" '"values"'
-
-# 6c. max(sum()) with time bucket subquery
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT max(\"total\") FROM (SELECT sum(\"online_count\") AS total FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY time(1h))")
-assert_contains "max(sum()) subquery returns values" "$BODY" '"values"'
-
-# 6d. Subquery with outer GROUP BY tag
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT sum(\"val\") FROM (SELECT last(\"online_count\") AS val FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY \"server_id\",\"region\") GROUP BY \"region\"")
-assert_contains "subquery with outer GROUP BY returns values" "$BODY" '"values"'
-
-# ============================================================
-section "7. /query - Edge cases"
-# ============================================================
-
-# 7a. Missing q parameter
+# Missing q parameter
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/query")
 assert_status "/query without q returns 400" "400" "$STATUS"
 
-# 7b. POST /query
+# POST /query
 STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/query" -d "q=SHOW+DATABASES")
 assert_status "POST /query works" "200" "$STATUS"
 
-# 7c. now() time comparison
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT last(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > now() - 1000000h")
-assert_contains "now() time comparison works" "$BODY" '"values"'
-
-# 7d. fill(null)
-BODY=$(curl -s -G "$URL/query" --data-urlencode "q=SELECT mean(\"online_count\") FROM \"${MEASUREMENT}\" WHERE time > '2025-08-20T00:00:00Z' GROUP BY time(1h) fill(null)")
-assert_contains "fill(null) does not error" "$BODY" "results"
-
 # ============================================================
-section "8. Response format validation"
+section "6. Response format validation"
 # ============================================================
 
-# Validate JSON structure
 BODY=$(curl -s "$URL/query?q=SHOW%20DATABASES")
 VALID=$(python3 -c "
 import sys, json
@@ -276,7 +190,7 @@ fi
 # ============================================================
 # Cleanup test measurement
 # ============================================================
-section "9. Cleanup"
+section "7. Cleanup"
 
 BODY=$(curl -s "$URL/query?q=DROP%20MEASUREMENT%20%22${MEASUREMENT}%22")
 assert_contains "DROP MEASUREMENT accepted" "$BODY" "results"
