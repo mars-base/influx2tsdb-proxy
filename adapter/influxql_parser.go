@@ -129,7 +129,13 @@ func containsSubquery(upper string) bool {
 func (c *Converter) handleSimpleSelect(query string) (*InfluxDBResponse, error) {
 	q := c.parseSelectQuery(query)
 
-	sql := c.buildSimpleSQL(q)
+	var sql string
+	if (q.hasLast || q.hasFirst) && len(q.groupByTags) > 0 && q.groupByTime == "" {
+		// UNION ALL with per-tag index lookup (avoids full sort)
+		sql = c.buildLastFirstLateralSQL(q)
+	} else {
+		sql = c.buildSimpleSQL(q)
+	}
 
 	log.Printf("[SQL] %s", sql)
 
@@ -247,6 +253,93 @@ func (c *Converter) parseSelectQuery(query string) selectQuery {
 	}
 
 	return q
+}
+
+// buildLastFirstLateralSQL generates optimized SQL for last()/first() using LATERAL JOIN.
+// Instead of DISTINCT ON (full sort), each tag group gets an independent LIMIT 1 index lookup.
+//
+// Generated SQL:
+//
+//	SELECT tags."server_id", t.time, t.online_count AS "val"
+//	FROM (SELECT DISTINCT "server_id" FROM "server_online" WHERE time > ...) AS tags
+//	CROSS JOIN LATERAL (
+//	  SELECT time, online_count AS "val"
+//	  FROM "server_online"
+//	  WHERE time > ... AND "server_id" = tags."server_id"
+//	  ORDER BY time DESC LIMIT 1
+//	) AS t
+func (c *Converter) buildLastFirstLateralSQL(q selectQuery) string {
+	var sql strings.Builder
+	table := q.measurement
+	where := c.convertWhere(q.where)
+
+	// Build converted field list (last("f") AS alias → "f" AS "alias")
+	convertedFields := c.convertFields(q.fields, "")
+
+	// Build lateral SELECT: time + converted fields
+	lateralSelect := fmt.Sprintf("time, %s", strings.Join(convertedFields, ", "))
+
+	// Build tag filter and outer tag columns
+	var tagFilters []string
+	var tagCols []string
+	for _, tag := range q.groupByTags {
+		tagFilters = append(tagFilters, fmt.Sprintf(`"%s" = tags."%s"`, tag, tag))
+		tagCols = append(tagCols, fmt.Sprintf(`tags."%s"`, tag))
+	}
+
+	// ORDER direction
+	orderDir := "DESC"
+	if q.hasFirst {
+		orderDir = "ASC"
+	}
+
+	// Outer SELECT: tag columns + lateral columns
+	sql.WriteString("SELECT ")
+	sql.WriteString(strings.Join(tagCols, ", "))
+	sql.WriteString(", ")
+	sql.WriteString(fmt.Sprintf("t.time, %s", joinLateralFields(convertedFields)))
+
+	// FROM: distinct tags subquery
+	sql.WriteString(" FROM (")
+	sql.WriteString(fmt.Sprintf(`SELECT DISTINCT %s FROM "%s"`,
+		joinQuotedTags(q.groupByTags), table))
+	if where != "" {
+		sql.WriteString(fmt.Sprintf(" WHERE %s", where))
+	}
+	sql.WriteString(") AS tags")
+
+	// CROSS JOIN LATERAL
+	sql.WriteString(" CROSS JOIN LATERAL (")
+	sql.WriteString(fmt.Sprintf(`SELECT %s FROM "%s"`, lateralSelect, table))
+	if where != "" {
+		sql.WriteString(fmt.Sprintf(" WHERE %s AND %s", where, strings.Join(tagFilters, " AND ")))
+	} else {
+		sql.WriteString(fmt.Sprintf(" WHERE %s", strings.Join(tagFilters, " AND ")))
+	}
+	sql.WriteString(fmt.Sprintf(" ORDER BY time %s LIMIT 1", orderDir))
+	sql.WriteString(") AS t")
+
+	return sql.String()
+}
+
+// joinQuotedTags joins tag names with quotes: "tag1", "tag2"
+func joinQuotedTags(tags []string) string {
+	quoted := make([]string, len(tags))
+	for i, t := range tags {
+		quoted[i] = fmt.Sprintf(`"%s"`, t)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// joinLateralFields prefixes converted fields with "t." for the outer SELECT
+func joinLateralFields(fields []string) string {
+	result := make([]string, len(fields))
+	for i, f := range fields {
+		// f is like `"online_count" AS "val"` or `"online_count"`
+		// prefix with t.: `t."online_count" AS "val"` or `t."online_count"`
+		result[i] = "t." + f
+	}
+	return strings.Join(result, ", ")
 }
 
 func (c *Converter) buildSimpleSQL(q selectQuery) string {
