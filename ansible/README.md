@@ -34,13 +34,8 @@ curl -sL https://raw.githubusercontent.com/mars-base/influx2tsdb-proxy/main/ansi
 
 ```bash
 git clone https://github.com/mars-base/influx2tsdb-proxy.git
-cd influx2tsdb-proxy/ansible
-```
-
-### 方式 3：从 Galaxy 安装
-
-```bash
-ansible-galaxy install -r requirements.yml
+cp -r influx2tsdb-proxy/ansible /srv/influx2tsdb-proxy
+cd /srv/influx2tsdb-proxy
 ```
 
 ## 配置
