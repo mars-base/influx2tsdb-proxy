@@ -7,7 +7,7 @@ Verify the influx2tsdb-proxy is API-compatible with InfluxDB 1.x by comparing wr
 | Component | Address | Database |
 |-----------|---------|----------|
 | InfluxDB 1.x | `localhost:8086` | `game_monitor` |
-| influx2tsdb-proxy | `localhost:8087` | `tsdb` |
+| influx2tsdb-proxy | `localhost:8087` | `game_monitor` *(ignored by proxy)* |
 | TimescaleDB (PostgreSQL) | `192.168.1.100:5433` | `tsdb` |
 | Grafana | `192.168.1.200:3000` | — |
 
@@ -54,7 +54,7 @@ nohup ./influx2tsdb-proxy -pg "postgres://dba:tsdbpass123@192.168.1.100:5433/tsd
 
 ```bash
 cd ~/bucket/influxdb-tsdb-proxy
-DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=tsdb \
+DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor \
   nohup python3 scripts/sample_online_influx.py > /tmp/sample_dual.log 2>&1 &
 ```
 
@@ -71,8 +71,8 @@ This writes identical data to both InfluxDB (8086) and the proxy (8087) every 5 
 curl -i -X POST "http://localhost:8086/write?db=game_monitor" \
   --data-binary 'server_online,server_id=test_s1,region=test online_count=100i'
 
-# Proxy
-curl -i -X POST "http://localhost:8087/write?db=tsdb" \
+# Proxy (uses same db name - proxy ignores it and writes to TimescaleDB)
+curl -i -X POST "http://localhost:8087/write?db=game_monitor" \
   --data-binary 'server_online,server_id=test_s1,region=test online_count=100i'
 ```
 
@@ -85,7 +85,7 @@ curl -i -X POST "http://localhost:8086/write?db=game_monitor" \
   --data-binary 'server_online,server_id=test_s2,region=test online_count=200i
 server_online,server_id=test_s3,region=test online_count=300i'
 
-curl -i -X POST "http://localhost:8087/write?db=tsdb" \
+curl -i -X POST "http://localhost:8087/write?db=game_monitor" \
   --data-binary 'server_online,server_id=test_s2,region=test online_count=200i
 server_online,server_id=test_s3,region=test online_count=300i'
 ```
@@ -99,7 +99,7 @@ server_online,server_id=test_s3,region=test online_count=300i'
 curl -s "http://localhost:8086/query?db=game_monitor&q=SELECT%20count(*)%20FROM%20%22server_online%22" | python3 -m json.tool
 
 # Proxy
-curl -s "http://localhost:8087/query?db=tsdb&q=SELECT%20count(*)%20FROM%20%22server_online%22" | python3 -m json.tool
+curl -s "http://localhost:8087/query?db=game_monitor&q=SELECT%20count(*)%20FROM%20%22server_online%22" | python3 -m json.tool
 ```
 
 **Expected**: Both return similar `count_online_count` values (proxy may include dual-write data).
@@ -109,7 +109,7 @@ curl -s "http://localhost:8087/query?db=tsdb&q=SELECT%20count(*)%20FROM%20%22ser
 ```bash
 # Both should return 400
 curl -i -X POST "http://localhost:8086/write?db=game_monitor" --data-binary 'invalid data'
-curl -i -X POST "http://localhost:8087/write?db=tsdb" --data-binary 'invalid data'
+curl -i -X POST "http://localhost:8087/write?db=game_monitor" --data-binary 'invalid data'
 ```
 
 ---
@@ -153,7 +153,7 @@ for q in "${queries[@]}"; do
   echo "--- InfluxDB (8086) ---"
   curl -s "http://localhost:8086/query?db=game_monitor&q=$encoded" | python3 -m json.tool
   echo "--- Proxy (8087) ---"
-  curl -s "http://localhost:8087/query?db=tsdb&q=$encoded" | python3 -m json.tool
+  curl -s "http://localhost:8087/query?db=game_monitor&q=$encoded" | python3 -m json.tool
   echo ""
 done
 ```
@@ -178,7 +178,7 @@ for q in "${queries[@]}"; do
   curl -s "http://localhost:8086/query?db=game_monitor&epoch=ms&q=$encoded" | \
     python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d['results'][0].get('series',[{'values':[]}])[0].get('values',[])[:3], indent=2))"
   echo "--- Proxy (8087) ---"
-  curl -s "http://localhost:8087/query?db=tsdb&epoch=ms&q=$encoded" | \
+  curl -s "http://localhost:8087/query?db=game_monitor&epoch=ms&q=$encoded" | \
     python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d['results'][0].get('series',[{'values':[]}])[0].get('values',[])[:3], indent=2))"
   echo ""
 done
@@ -207,7 +207,7 @@ for q in "${queries[@]}"; do
   curl -s "http://localhost:8086/query?db=game_monitor&epoch=ms&q=$encoded" | \
     python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d['results'][0].get('series',[{'values':[]}])[0].get('values',[])[:3], indent=2))"
   echo "--- Proxy (8087) ---"
-  curl -s "http://localhost:8087/query?db=tsdb&epoch=ms&q=$encoded" | \
+  curl -s "http://localhost:8087/query?db=game_monitor&epoch=ms&q=$encoded" | \
     python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d['results'][0].get('series',[{'values':[]}])[0].get('values',[])[:3], indent=2))"
   echo ""
 done
@@ -261,7 +261,7 @@ curl -s -X POST "http://admin:<password>@192.168.1.200:3000/api/datasources" \
     "type": "influxdb",
     "uid": "efvqp59hcterke",
     "url": "http://192.168.1.100:8087",
-    "database": "tsdb",
+    "database": "game_monitor",
     "access": "proxy"
   }'
 ```

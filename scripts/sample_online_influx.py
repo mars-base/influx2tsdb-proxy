@@ -74,7 +74,7 @@ INTERVAL = 5  # 采样间隔（秒）
 DUAL_WRITE = os.getenv("DUAL_WRITE", "0") == "1"
 INFLUX_HOST2 = os.getenv("INFLUX_HOST2", "localhost")
 INFLUX_PORT2 = os.getenv("INFLUX_PORT2", "8087")
-INFLUX_DB2 = os.getenv("INFLUX_DB2", "tsdb")
+INFLUX_DB2 = os.getenv("INFLUX_DB2", "game_monitor")
 INFLUX_URL2 = f"http://{INFLUX_HOST2}:{INFLUX_PORT2}"
 WRITE_URL2 = f"{INFLUX_URL2}/write?db={INFLUX_DB2}"
 
