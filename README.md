@@ -106,6 +106,30 @@ make cross
 
 Binary output: `build/influx2tsdb-proxy`
 
+## Testing
+
+See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the full comparison test guide between InfluxDB 1.x and influx2tsdb-proxy.
+
+The test covers three dimensions:
+
+1. **Write interface** — single/multi-line Line Protocol, invalid input, concurrent dual-write
+2. **Read interface** — `/ping`, `/debug/vars`, `SHOW` queries, aggregations (`mean`/`sum`/`max`/`min`/`count`/`last`), subqueries, epoch time format
+3. **Grafana panel verification** — 7 panels (stat, timeseries, bargauge, piechart) rendered side-by-side from real InfluxDB and proxy datasources
+
+Quick start:
+
+```bash
+# 1. Start proxy
+./influx2tsdb-proxy -pg "postgres://user:pass@host:port/db"
+
+# 2. Run dual-write sampling (writes identical data to both InfluxDB and proxy)
+DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=tsdb python3 scripts/sample_online_influx.py
+
+# 3. Compare responses
+curl -s "http://localhost:8086/query?db=game_monitor&epoch=ms&q=SELECT%20mean(%22online_count%22)%20FROM%20%22server_online%22%20WHERE%20time%20%3E%20now()%20-%205m%20GROUP%20BY%20time(30s)"
+curl -s "http://localhost:8087/query?db=tsdb&epoch=ms&q=SELECT%20mean(%22online_count%22)%20FROM%20%22server_online%22%20WHERE%20time%20%3E%20now()%20-%205m%20GROUP%20BY%20time(30s)"
+```
+
 ## License
 
 MIT
