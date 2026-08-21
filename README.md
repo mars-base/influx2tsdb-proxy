@@ -9,6 +9,7 @@ Grafana can use InfluxDB datasource to query TimescaleDB data transparently.
 - InfluxDB 1.x HTTP API compatible (`/ping`, `/write`, `/query`, `/debug/vars`)
 - Line Protocol parser (measurement, tags, fields, timestamp)
 - InfluxQL to SQL translation (aggregations, `time_bucket`, subqueries, `last()` → `DISTINCT ON`)
+- Retention policy CRUD (`CREATE / ALTER / DROP / SHOW RETENTION POLICY`) with automatic TimescaleDB sync
 - Auto table and hypertable creation with metadata tracking
 - `SHOW DATABASES / MEASUREMENTS / TAG VALUES / FIELD KEYS` support
 - TimescaleDB extension auto-detection and creation
@@ -73,7 +74,26 @@ PG_DSN="postgres://user:pass@host:port/db" make run
 | `time > now() - 5s` | `time > now() - interval '5 seconds'` |
 | `$timeFilter` | `time >= $from AND time <= $to` |
 
-### Subquery Example
+## Retention Policy
+
+Supports InfluxDB 1.x retention policy CRUD, automatically syncing to TimescaleDB's native retention policy via `add_retention_policy`.
+
+| InfluxQL | Description |
+|----------|-------------|
+| `CREATE RETENTION POLICY "rp_7d" ON "db" DURATION 7d REPLICATION 1 DEFAULT` | Create policy, set as default |
+| `ALTER RETENTION POLICY "rp_7d" ON "db" DURATION 30d` | Modify duration |
+| `DROP RETENTION POLICY "rp_7d" ON "db"` | Delete policy |
+| `SHOW RETENTION POLICIES ON "db"` | List all policies |
+
+### How It Works
+
+- Policies are stored in the `_retention_policy` metadata table
+- The **default** policy is applied to all hypertables (InfluxDB retention is per-database)
+- `CREATE / ALTER / DROP` trigger immediate sync to TimescaleDB; a background sync runs every 5 minutes
+- Duration formats: `7d`, `168h`, `30d`, `1w`, `INF` / `0s` (infinite = no retention)
+- `DROP` removes TimescaleDB retention jobs when no default policy remains
+
+## Subquery Example
 
 ```sql
 -- InfluxQL
@@ -136,6 +156,10 @@ Both endpoints return identical data for all supported commands:
 | 8 | `SELECT last(...) GROUP BY server_id` | 8 servers, values match | 8 servers, values match | ✅ |
 | 9 | `SELECT count(...) WHERE time > now()-1m` | 96 | 96 | ✅ |
 | 10 | Subquery `SELECT sum(last()) GROUP BY server_id` | 21430 | 21430 | ✅ |
+| 11 | `CREATE RETENTION POLICY "rp_7d" ... DURATION 7d` | ✅ | ✅ | ✅ |
+| 12 | `SHOW RETENTION POLICIES` | autogen + rp_7d, shardGroupDuration match | identical | ✅ |
+| 13 | `ALTER RETENTION POLICY "rp_7d" ... DURATION 1d` | ✅ | ✅ | ✅ |
+| 14 | `DROP RETENTION POLICY "rp_7d"` | ✅ | ✅ | ✅ |
 
 Known minor differences:
 - **SHOW DATABASES**: InfluxDB lists all databases; proxy returns only the requested `db` parameter

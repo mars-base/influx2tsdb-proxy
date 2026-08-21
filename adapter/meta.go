@@ -13,11 +13,12 @@ import (
 
 // MetaStore manages measurement/tag/field metadata and table auto-creation
 type MetaStore struct {
-	ctx  context.Context
-	pool *pgxpool.Pool
-	mu   sync.RWMutex
+	ctx            context.Context
+	pool           *pgxpool.Pool
+	mu             sync.RWMutex
 	// Cache: measurement -> table schema
-	tables map[string]*TableSchema
+	tables         map[string]*TableSchema
+	retentionStore *RetentionStore // optional, for chunk_time_interval
 }
 
 type TableSchema struct {
@@ -36,6 +37,11 @@ func NewMetaStore(ctx context.Context, pool *pgxpool.Pool) *MetaStore {
 		pool:   pool,
 		tables: make(map[string]*TableSchema),
 	}
+}
+
+// SetRetentionStore links the retention store so EnsureTable can set chunk_time_interval
+func (m *MetaStore) SetRetentionStore(rs *RetentionStore) {
+	m.retentionStore = rs
 }
 
 // Initialize creates the _influx_meta table and loads existing schemas
@@ -147,6 +153,14 @@ func (m *MetaStore) EnsureTable(measurement string, tags map[string]string, fiel
 		escapeIdent(measurement))
 	if _, err := m.pool.Exec(m.ctx, hyperSQL); err != nil {
 		return fmt.Errorf("create hypertable %s: %w", measurement, err)
+	}
+
+	// Apply chunk_time_interval from retention policy (if available)
+	if m.retentionStore != nil {
+		chunkInterval := m.retentionStore.DefaultChunkInterval()
+		_, _ = m.pool.Exec(m.ctx,
+			fmt.Sprintf("SELECT set_chunk_time_interval('%s', INTERVAL '%s')",
+				escapeIdent(measurement), chunkInterval))
 	}
 
 	return nil

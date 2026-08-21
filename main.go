@@ -100,6 +100,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize retention store: %v", err)
 	}
+	// Link retention store to meta store for chunk_time_interval
+	meta.SetRetentionStore(retentionStore)
 	// Initial sync of retention policies to TimescaleDB
 	if err := retentionStore.SyncToTimescaleDB(); err != nil {
 		log.Printf("Warning: initial retention sync failed: %v", err)

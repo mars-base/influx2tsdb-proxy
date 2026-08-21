@@ -80,21 +80,13 @@ func (c *Converter) handleShowRetentionPolicies() *InfluxDBResponse {
 	}
 
 	policies := c.retentionStore.ShowPolicies()
-	if len(policies) == 0 {
-		// Return default autogen policy
-		return &InfluxDBResponse{
-			Results: []InfluxDBResult{{
-				Series: []InfluxDBSeries{{
-					Columns: []string{"name", "duration", "shardGroupDuration", "replicaN", "default"},
-					Values:  [][]interface{}{{"autogen", "0s", "168h0m0s", 1, true}},
-				}},
-			}},
-		}
-	}
 
-	values := make([][]interface{}, len(policies))
-	for i, rp := range policies {
-		values[i] = []interface{}{rp.Name, rp.Duration, "168h0m0s", 1, rp.IsDefault}
+	values := make([][]interface{}, 0, len(policies))
+	for _, rp := range policies {
+		// Normalize duration to Go format (e.g., 7d → 168h0m0s)
+		dur := time.Duration(rp.DurationNs).String()
+		sgd := shardGroupDuration(rp.DurationNs)
+		values = append(values, []interface{}{rp.Name, dur, sgd, 1, rp.IsDefault})
 	}
 
 	return &InfluxDBResponse{
@@ -893,6 +885,22 @@ func replaceTimeComparisons(where string) string {
 }
 
 // splitFields splits SELECT field list by commas, respecting parentheses
+// shardGroupDuration returns the InfluxDB-style shard group duration
+// based on retention duration (matches InfluxDB's internal algorithm).
+func shardGroupDuration(durationNs int64) string {
+	hours := durationNs / int64(time.Hour)
+	switch {
+	case hours == 0: // infinite
+		return "168h0m0s"
+	case hours < 24: // < 1 day
+		return "1h0m0s"
+	case hours < 4320: // < 180 days
+		return "24h0m0s"
+	default:
+		return "168h0m0s"
+	}
+}
+
 func splitFields(s string) []string {
 	var parts []string
 	var current strings.Builder

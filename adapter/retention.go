@@ -16,6 +16,7 @@ import (
 // RetentionPolicy represents an InfluxDB retention policy
 type RetentionPolicy struct {
 	Name       string
+	DBName     string
 	Duration   string // original duration string (e.g., "7d", "168h", "INF")
 	DurationNs int64  // duration in nanoseconds (0 = infinite)
 	IsDefault  bool
@@ -27,7 +28,7 @@ type RetentionStore struct {
 	ctx       context.Context
 	pool      *pgxpool.Pool
 	mu        sync.RWMutex
-	policies  map[string]*RetentionPolicy // measurement -> policy
+	policies  map[string]*RetentionPolicy // policy name -> policy
 	lastSync  time.Time
 	syncEvery time.Duration
 }
@@ -51,7 +52,7 @@ func NewRetentionStore(ctx context.Context, pool *pgxpool.Pool) (*RetentionStore
 // initialize creates the _retention_policy table and loads existing policies
 func (rs *RetentionStore) initialize() error {
 	sql := `CREATE TABLE IF NOT EXISTS _retention_policy (
-		measurement TEXT PRIMARY KEY,
+		name TEXT PRIMARY KEY,
 		duration TEXT NOT NULL,
 		duration_ns BIGINT NOT NULL,
 		is_default BOOLEAN DEFAULT FALSE,
@@ -60,11 +61,37 @@ func (rs *RetentionStore) initialize() error {
 	if _, err := rs.pool.Exec(rs.ctx, sql); err != nil {
 		return fmt.Errorf("create _retention_policy: %w", err)
 	}
+
+	// Migrate: rename old 'measurement' column to 'name' if it exists
+	var oldColExists bool
+	rs.pool.QueryRow(rs.ctx,
+		"SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = '_retention_policy' AND column_name = 'measurement')").Scan(&oldColExists)
+	if oldColExists {
+		_, err := rs.pool.Exec(rs.ctx, "ALTER TABLE _retention_policy RENAME COLUMN measurement TO name")
+		if err != nil {
+			return fmt.Errorf("migrate _retention_policy column: %w", err)
+		}
+		log.Println("Migrated _retention_policy: measurement -> name")
+	}
+
+	// Insert default autogen policy if not present (matches InfluxDB behavior)
+	var hasAutogen bool
+	rs.pool.QueryRow(rs.ctx, "SELECT EXISTS(SELECT 1 FROM _retention_policy WHERE name = 'autogen')").Scan(&hasAutogen)
+	if !hasAutogen {
+		_, err := rs.pool.Exec(rs.ctx,
+			`INSERT INTO _retention_policy (name, duration, duration_ns, is_default)
+			VALUES ('autogen', '0s', 0, true)`)
+		if err != nil {
+			return fmt.Errorf("insert autogen policy: %w", err)
+		}
+		log.Println("Created default autogen retention policy")
+	}
+
 	log.Println("Initialized _retention_policy table")
 
 	// Load existing policies
 	rows, err := rs.pool.Query(rs.ctx,
-		"SELECT measurement, duration, duration_ns, is_default, created_at FROM _retention_policy ORDER BY measurement")
+		"SELECT name, duration, duration_ns, is_default, created_at FROM _retention_policy ORDER BY name")
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
 			return nil
@@ -121,12 +148,16 @@ func (rs *RetentionStore) CreatePolicy(name string, duration string, isDefault b
 			"UPDATE _retention_policy SET is_default = FALSE WHERE is_default = TRUE"); err != nil {
 			return fmt.Errorf("clear default: %w", err)
 		}
+		// Update cache: clear all other defaults
+		for _, rp := range rs.policies {
+			rp.IsDefault = false
+		}
 	}
 
 	// Upsert policy
-	sql := `INSERT INTO _retention_policy (measurement, duration, duration_ns, is_default)
+	sql := `INSERT INTO _retention_policy (name, duration, duration_ns, is_default)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (measurement) DO UPDATE
+		ON CONFLICT (name) DO UPDATE
 		SET duration = EXCLUDED.duration,
 		    duration_ns = EXCLUDED.duration_ns,
 		    is_default = EXCLUDED.is_default`
@@ -141,6 +172,22 @@ func (rs *RetentionStore) CreatePolicy(name string, duration string, isDefault b
 		DurationNs: durationNs,
 		IsDefault:  isDefault,
 		CreatedAt:  time.Now(),
+	}
+
+	// Reload all policies from DB to sync is_default changes
+	rows, err := rs.pool.Query(rs.ctx,
+		"SELECT name, is_default FROM _retention_policy")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var pName string
+			var pDefault bool
+			if err := rows.Scan(&pName, &pDefault); err == nil {
+				if p, ok := rs.policies[pName]; ok {
+					p.IsDefault = pDefault
+				}
+			}
+		}
 	}
 
 	log.Printf("Created/updated retention policy: %s duration=%s default=%v", name, duration, isDefault)
@@ -165,7 +212,7 @@ func (rs *RetentionStore) AlterPolicy(name string, duration string) error {
 	}
 
 	// Update
-	sql := `UPDATE _retention_policy SET duration = $2, duration_ns = $3 WHERE measurement = $1`
+	sql := `UPDATE _retention_policy SET duration = $2, duration_ns = $3 WHERE name = $1`
 	if _, err := rs.pool.Exec(rs.ctx, sql, name, duration, durationNs); err != nil {
 		return fmt.Errorf("update policy: %w", err)
 	}
@@ -190,7 +237,7 @@ func (rs *RetentionStore) DropPolicy(name string) error {
 
 	// Delete from table
 	if _, err := rs.pool.Exec(rs.ctx,
-		"DELETE FROM _retention_policy WHERE measurement = $1", name); err != nil {
+		"DELETE FROM _retention_policy WHERE name = $1", name); err != nil {
 		return fmt.Errorf("delete policy: %w", err)
 	}
 
@@ -278,10 +325,58 @@ func (rs *RetentionStore) SyncToTimescaleDB() error {
 			}
 			log.Printf("Applied retention policy: %s -> %s (from %s)", htName, interval, defaultPolicy.Name)
 		}
+
+		// Sync chunk_time_interval to match shardGroupDuration
+		chunkInterval := rs.DefaultChunkInterval()
+		_, err = rs.pool.Exec(rs.ctx,
+			fmt.Sprintf("SELECT set_chunk_time_interval('%s', INTERVAL '%s')", htName, chunkInterval))
+		if err != nil {
+			log.Printf("Set chunk_time_interval for %s: %v", htName, err)
+		} else {
+			log.Printf("Applied chunk_time_interval: %s -> %s", htName, chunkInterval)
+		}
 	}
 
 	rs.lastSync = time.Now()
 	return nil
+}
+
+// DefaultChunkInterval returns the chunk_time_interval based on the default
+// retention policy duration (matches InfluxDB's shardGroupDuration logic).
+// Returns "1 week" if no policy is set.
+func (rs *RetentionStore) DefaultChunkInterval() string {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+
+	var defaultPolicy *RetentionPolicy
+	for _, rp := range rs.policies {
+		if rp.IsDefault {
+			defaultPolicy = rp
+			break
+		}
+	}
+	if defaultPolicy == nil {
+		for _, rp := range rs.policies {
+			if rp.DurationNs > 0 {
+				defaultPolicy = rp
+				break
+			}
+		}
+	}
+
+	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
+		return "1 week"
+	}
+
+	hours := defaultPolicy.DurationNs / int64(time.Hour)
+	switch {
+	case hours < 24: // < 1 day
+		return "1 hour"
+	case hours < 4320: // < 180 days
+		return "1 day"
+	default:
+		return "1 week"
+	}
 }
 
 // parseDuration parses InfluxDB duration format to nanoseconds
