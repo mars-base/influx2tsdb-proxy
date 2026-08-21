@@ -1,6 +1,8 @@
 #!/bin/bash
 # InfluxDB 1.x API Test Suite for influx2tsdb-proxy
 # Usage: ./test/test_api.sh [HOST:PORT] [DB_NAME]
+#   HOST:PORT  default: localhost:8087
+#   DB_NAME    default: testdb
 #
 # Test data is loaded from:
 #   test/data/writes.txt  - Line Protocol write cases
@@ -9,8 +11,9 @@
 set -e
 
 BASE="${1:-localhost:8087}"
-DB="${2:-game_monitor}"
+DB="${2:-testdb}"
 URL="http://$BASE"
+echo "Target: $URL, Database: $DB"
 PASS=0
 FAIL=0
 SKIP=0
