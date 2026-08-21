@@ -17,12 +17,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var version = "dev"
+
 func main() {
 	pgConn := flag.String("pg", "", "PostgreSQL connection string (e.g. postgres://user:pass@host:port/db?sslmode=disable)")
 	port := flag.String("port", "8087", "HTTP listen port")
 	poolSize := flag.Int("pool", 10, "Connection pool size")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging (SQL statements and query details)")
+	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("influx2tsdb-proxy version:", version)
+		os.Exit(0)
+	}
 
 	dsn := *pgConn
 	if dsn == "" {
