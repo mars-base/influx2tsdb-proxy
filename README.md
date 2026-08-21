@@ -113,16 +113,13 @@ See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the ful
 ### Quick Start
 
 ```bash
-# 1. Start proxy
 ./influx2tsdb-proxy -pg "postgres://user:pass@host:port/db"
-
-# 2. Run dual-write sampling (writes identical data to both InfluxDB and proxy)
-DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py
 ```
 
 ### influx CLI Compatibility (InfluxDB shell v1.11.8)
 
-Tested with `influx -host localhost -port 8087 -database game_monitor -execute "..."` using dual-write sampling.
+Tested with dual-write sampling: `DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py`
+
 Both endpoints return identical data for all supported commands:
 
 | # | Command | InfluxDB 8086 | Proxy 8087 | Match |
