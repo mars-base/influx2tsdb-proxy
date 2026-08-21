@@ -47,6 +47,7 @@ from datetime import datetime
 INFLUX_HOST = os.getenv("INFLUX_HOST", "localhost")
 INFLUX_PORT = os.getenv("INFLUX_PORT", "8086")
 INFLUX_DB = os.getenv("INFLUX_DB", "game_monitor")
+MEASUREMENT = os.getenv("MEASUREMENT", "server_online")
 INFLUX_URL = f"http://{INFLUX_HOST}:{INFLUX_PORT}"
 WRITE_URL = f"{INFLUX_URL}/write?db={INFLUX_DB}"
 
@@ -98,7 +99,7 @@ def generate_line_protocol():
         base = BASE_ONLINE[server_id]
         online = int(base * random.uniform(0.97, 1.03))
         # measurement,tag=value field=value timestamp
-        lines.append(f"server_online,server_id={server_id},region={region} online_count={online}i")
+        lines.append(f"{MEASUREMENT},server_id={server_id},region={region} online_count={online}i")
     return lines, sum(int(l.split("online_count=")[1].rstrip("i")) for l in lines)
 
 
