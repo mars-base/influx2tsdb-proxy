@@ -1,0 +1,9 @@
+---
+- name: "Install influx2tsdb-proxy"
+  gather_facts: true
+  hosts: "{{ HOSTS }}"
+  become: true
+  become_user: root
+  become_method: sudo
+  roles:
+    - role: influx2tsdb-proxy
