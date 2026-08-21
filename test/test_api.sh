@@ -1,6 +1,6 @@
 #!/bin/bash
 # InfluxDB 1.x API Test Suite for influx2tsdb-proxy
-# Usage: ./test/test_api.sh [HOST:PORT]
+# Usage: ./test/test_api.sh [HOST:PORT] [DB_NAME]
 #
 # Test data is loaded from:
 #   test/data/writes.txt  - Line Protocol write cases
@@ -9,6 +9,7 @@
 set -e
 
 BASE="${1:-localhost:8087}"
+DB="${2:-game_monitor}"
 URL="http://$BASE"
 PASS=0
 FAIL=0
@@ -102,13 +103,13 @@ else
 
         # Special cases
         if [ "$desc" = "empty_body" ]; then
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" -d "")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=$DB" -d "")
         elif [ "$desc" = "get_write_method" ]; then
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/write?db=testdb")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/write?db=$DB")
         else
             # Handle \n as actual newlines for multi-line writes
             body=$(echo -e "$body")
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=testdb" -d "$body")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/write?db=$DB" -d "$body")
         fi
 
         assert_status "/write $desc" "$expected_status" "$STATUS"
