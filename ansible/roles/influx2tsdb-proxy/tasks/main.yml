@@ -35,6 +35,7 @@
   ansible.builtin.shell: >
     supervisorctl reread &&
     supervisorctl update &&
-    supervisorctl status
+    supervisorctl status {{ influx2tsdb_proxy_instances | map(attribute='name') | map('regex_replace', '^(.*)$', 'influx2tsdb-proxy-\1') | join(' ') }}
   changed_when: false
+  failed_when: false
   tags: [config, update]
