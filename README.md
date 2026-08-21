@@ -110,6 +110,20 @@ Binary output: `build/influx2tsdb-proxy`
 
 See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the full comparison test guide.
 
+### Quick Start
+
+```bash
+# 1. Start proxy
+./influx2tsdb-proxy -pg "postgres://user:pass@host:port/db"
+
+# 2. Run dual-write sampling (writes identical data to both InfluxDB and proxy)
+DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py
+
+# 3. Compare with influx CLI
+influx -host localhost -port 8086 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
+influx -host localhost -port 8087 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
+```
+
 ### influx CLI Compatibility (InfluxDB shell v1.11.8)
 
 Tested with `influx -host localhost -port 8087 -database game_monitor -execute "..."` using dual-write sampling.
@@ -132,20 +146,6 @@ Known minor differences:
 - **SHOW DATABASES**: InfluxDB lists all databases; proxy returns only the requested `db` parameter
 - **Time precision in `last()`**: InfluxDB uses native nanoseconds; TimescaleDB stores milliseconds, converted to ns for epoch output
 - **Count time column**: InfluxDB returns the latest write timestamp; proxy returns `0` for non-time-grouped aggregates (standard InfluxDB behavior)
-
-### Quick Start
-
-```bash
-# 1. Start proxy
-./influx2tsdb-proxy -pg "postgres://user:pass@host:port/db"
-
-# 2. Run dual-write sampling (writes identical data to both InfluxDB and proxy)
-DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py
-
-# 3. Compare with influx CLI
-influx -host localhost -port 8086 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
-influx -host localhost -port 8087 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
-```
 
 ## License
 
