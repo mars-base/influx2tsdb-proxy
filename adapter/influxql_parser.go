@@ -40,6 +40,8 @@ func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 		return handleShowTagKeys(c.meta, query), nil
 	case strings.HasPrefix(upper, "SHOW FIELD KEYS"):
 		return handleShowFieldKeys(c.meta, query), nil
+	case strings.HasPrefix(upper, "DROP MEASUREMENT"):
+		return c.handleDropMeasurement(query)
 	case strings.HasPrefix(upper, "CREATE DATABASE"):
 		return emptyResult(), nil
 	case strings.HasPrefix(upper, "DROP DATABASE"):
@@ -100,6 +102,33 @@ func handleShowTagKeys(meta *MetaStore, query string) *InfluxDBResponse {
 			}},
 		}},
 	}
+}
+
+// handleDropMeasurement processes DROP MEASUREMENT queries
+// Syntax: DROP MEASUREMENT "measurement_name"
+func (c *Converter) handleDropMeasurement(query string) (*InfluxDBResponse, error) {
+	// Extract measurement name after "DROP MEASUREMENT"
+	prefix := "DROP MEASUREMENT"
+	after := strings.TrimSpace(query[len(prefix):])
+	measurement := extractFirstToken(after)
+
+	if measurement == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing measurement name"}}}, nil
+	}
+
+	// Drop the table
+	_, err := c.meta.pool.Exec(c.meta.ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, measurement))
+	if err != nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}, nil
+	}
+
+	// Remove metadata
+	_, err = c.meta.pool.Exec(c.meta.ctx, "DELETE FROM _influx_meta WHERE measurement = $1", measurement)
+	if err != nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}, nil
+	}
+
+	return emptyResult(), nil
 }
 
 // handleSelect processes SELECT queries
