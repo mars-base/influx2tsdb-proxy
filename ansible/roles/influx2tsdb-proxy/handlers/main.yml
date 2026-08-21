@@ -1,9 +1,2 @@
 ---
-- name: Restart influx2tsdb-proxy instances
-  ansible.builtin.shell: >
-    supervisorctl reread &&
-    supervisorctl update &&
-    supervisorctl restart {{ influx2tsdb_proxy_instances | map(attribute='name') | map('regex_replace', '^(.*)$', 'influx2tsdb-proxy-\1') | join(' ') }}
-    ||
-    supervisorctl start {{ influx2tsdb_proxy_instances | map(attribute='name') | map('regex_replace', '^(.*)$', 'influx2tsdb-proxy-\1') | join(' ') }}
-  listen: "restart influx2tsdb-proxy instances"
+# No handlers needed - restart logic handled in tasks directly

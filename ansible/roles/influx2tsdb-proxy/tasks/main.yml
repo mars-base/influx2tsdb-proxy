@@ -28,14 +28,17 @@
     dest: /etc/supervisor/conf.d/influx2tsdb-proxy-{{ item.name }}.conf
     mode: '0644'
   loop: "{{ influx2tsdb_proxy_instances }}"
+  register: _template_results
   tags: [config, update]
-  notify: restart influx2tsdb-proxy instances
 
-- name: Reload supervisor and ensure all instances are running
-  ansible.builtin.shell: >
-    supervisorctl reread &&
-    supervisorctl update &&
-    supervisorctl status {{ influx2tsdb_proxy_instances | map(attribute='name') | map('regex_replace', '^(.*)$', 'influx2tsdb-proxy-\1') | join(' ') }}
-  changed_when: false
-  failed_when: false
+- name: Reload supervisor and restart changed instances
+  ansible.builtin.shell: |
+    supervisorctl reread
+    supervisorctl update
+    {% for result in _template_results.results %}
+    {% if result.changed %}
+    supervisorctl restart influx2tsdb-proxy-{{ result.item.name }} || supervisorctl start influx2tsdb-proxy-{{ result.item.name }}
+    {% endif %}
+    {% endfor %}
+  when: _template_results.results | selectattr('changed') | list | length > 0
   tags: [config, update]
