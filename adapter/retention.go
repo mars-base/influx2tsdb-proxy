@@ -213,54 +213,71 @@ func (rs *RetentionStore) ShowPolicies() []RetentionPolicy {
 	return result
 }
 
-// SyncToTimescaleDB applies retention policies to TimescaleDB hypertables
+// SyncToTimescaleDB applies the default retention policy to all hypertables.
+// InfluxDB retention policy is per-database, affecting all measurements.
 func (rs *RetentionStore) SyncToTimescaleDB() error {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
-	if len(rs.policies) == 0 {
-		return nil
+	// Find the default policy (first one marked default, or first non-zero duration)
+	var defaultPolicy *RetentionPolicy
+	for _, rp := range rs.policies {
+		if rp.IsDefault {
+			defaultPolicy = rp
+			break
+		}
+	}
+	if defaultPolicy == nil {
+		for _, rp := range rs.policies {
+			if rp.DurationNs > 0 {
+				defaultPolicy = rp
+				break
+			}
+		}
 	}
 
-	log.Printf("Syncing %d retention policies to TimescaleDB...", len(rs.policies))
+	// Get all hypertables
+	rows, err := rs.pool.Query(rs.ctx,
+		"SELECT hypertable_name FROM timescaledb_information.hypertables")
+	if err != nil {
+		return fmt.Errorf("query hypertables: %w", err)
+	}
+	defer rows.Close()
 
-	for name, rp := range rs.policies {
-		// Skip infinite duration
-		if rp.DurationNs == 0 {
+	var hypertables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			continue
 		}
-
-		// Convert nanoseconds to interval
-		durationSec := rp.DurationNs / int64(time.Second)
-		interval := fmt.Sprintf("%d seconds", durationSec)
-
-		// Check if hypertable exists
-		var hypertableExists bool
-		err := rs.pool.QueryRow(rs.ctx,
-			"SELECT EXISTS(SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = $1)",
-			name).Scan(&hypertableExists)
-		if err != nil {
-			log.Printf("Check hypertable %s: %v", name, err)
+		// Skip internal tables (starting with _)
+		if strings.HasPrefix(name, "_") {
 			continue
 		}
-		if !hypertableExists {
-			log.Printf("Hypertable %s not found, skipping retention policy", name)
-			continue
-		}
+		hypertables = append(hypertables, name)
+	}
+	rows.Close()
 
-		// Remove existing policy (if any)
+	log.Printf("Syncing retention policies to %d hypertables...", len(hypertables))
+
+	for _, htName := range hypertables {
+		// Remove existing retention policy (if any)
 		_, _ = rs.pool.Exec(rs.ctx,
-			fmt.Sprintf("SELECT remove_retention_policy('%s')", name))
+			fmt.Sprintf("SELECT remove_retention_policy('%s')", htName))
 
-		// Add new policy
-		_, err = rs.pool.Exec(rs.ctx,
-			fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', if_not_exists => true)", name, interval))
-		if err != nil {
-			log.Printf("Add retention policy for %s: %v", name, err)
-			continue
+		// Apply default policy if it exists and has a valid duration
+		if defaultPolicy != nil && defaultPolicy.DurationNs > 0 {
+			durationSec := defaultPolicy.DurationNs / int64(time.Second)
+			interval := fmt.Sprintf("%d seconds", durationSec)
+
+			_, err = rs.pool.Exec(rs.ctx,
+				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', if_not_exists => true)", htName, interval))
+			if err != nil {
+				log.Printf("Add retention policy for %s: %v", htName, err)
+				continue
+			}
+			log.Printf("Applied retention policy: %s -> %s (from %s)", htName, interval, defaultPolicy.Name)
 		}
-
-		log.Printf("Applied retention policy: %s -> %s", name, interval)
 	}
 
 	rs.lastSync = time.Now()

@@ -204,6 +204,11 @@ func (c *Converter) handleDropRetentionPolicy(query string) *InfluxDBResponse {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
 
+	// Sync immediately to TimescaleDB (removes retention jobs since no default policy remains)
+	if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
+		log.Printf("Warning: retention sync after DROP failed: %v", err)
+	}
+
 	return emptyResult()
 }
 
