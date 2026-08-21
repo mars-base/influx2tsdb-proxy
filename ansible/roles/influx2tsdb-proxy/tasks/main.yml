@@ -14,6 +14,36 @@
     force: yes
   tags: [install, update]
 
+- name: Find existing supervisor configurations
+  ansible.builtin.find:
+    paths: /etc/supervisor/conf.d
+    patterns: "influx2tsdb-proxy-*.conf"
+  register: _existing_confs
+  tags: [config, update, cleanup]
+
+- name: Determine removed instances
+  ansible.builtin.set_fact:
+    _removed_instances: "{{ _existing_confs.files | map(attribute='path') | map('basename') | map('regex_replace', '^influx2tsdb-proxy-(.*)\\.conf$', '\\1') | difference(influx2tsdb_proxy_instances | map(attribute='name') | list) }}"
+  tags: [config, update, cleanup]
+
+- name: Stop removed instances
+  ansible.builtin.shell: "supervisorctl stop influx2tsdb-proxy-{{ item }} 2>/dev/null; rm -f /etc/supervisor/conf.d/influx2tsdb-proxy-{{ item }}.conf"
+  loop: "{{ _removed_instances }}"
+  failed_when: false
+  tags: [config, update, cleanup]
+
+- name: Reload supervisor after cleanup
+  ansible.builtin.shell: "supervisorctl reread && supervisorctl update"
+  when: _removed_instances | length > 0
+  tags: [config, update, cleanup]
+
+- name: Remove directories for removed instances
+  ansible.builtin.file:
+    path: "/srv/influx2tsdb-proxy-{{ item }}"
+    state: absent
+  loop: "{{ _removed_instances }}"
+  tags: [config, update, cleanup]
+
 - name: Create instance directories
   ansible.builtin.file:
     path: "{{ item.dir | default('/srv/influx2tsdb-proxy-' + item.name) }}/logs"
