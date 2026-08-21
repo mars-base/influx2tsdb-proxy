@@ -1,23 +1,37 @@
 ---
-# influx2tsdb-proxy 默认配置（支持单机多实例）
+# influx2tsdb-proxy Ansible role 默认配置
 
-influx2tsdb_proxy_version: latest
+# GitHub Release 版本
+influx2tsdb_proxy_version: "v1.0.1"
 
-# 下载 URL（从 GitHub Releases 获取）
-influx2tsdb_proxy_binary_url: "https://github.com/mars-base/influx2tsdb-proxy/releases/{{ influx2tsdb_proxy_version }}/download/influx2tsdb-proxy-linux-amd64"
+# 二进制文件下载 URL
+# 注意：GitHub Release URL 格式为 /releases/download/<tag>/<filename>
+influx2tsdb_proxy_binary_url: "https://github.com/mars-base/influx2tsdb-proxy/releases/download/{{ influx2tsdb_proxy_version }}/influx2tsdb-proxy-linux-amd64"
 
-# 实例列表（每个实例独立目录、端口、DSN、supervisor 进程）
-# 必须在 host_vars / group_vars 中覆盖
+# 安装目录（默认不设置，由 task 自动计算为 /opt/influx2tsdb-proxy-<instance_name>）
+# influx2tsdb_proxy_dir: "/opt/influx2tsdb-proxy"
+
+# 监听端口（默认不设置，由 task 自动计算为 8086 + index）
+# influx2tsdb_proxy_port: 8086
+
+# 连接池大小
+influx2tsdb_proxy_pool_size: 10
+
+# 是否启用 verbose 模式
+influx2tsdb_proxy_verbose: false
+
+# Supervisor 配置
+influx2tsdb_proxy_supervisor_autorestart: true
+influx2tsdb_proxy_supervisor_autostart: true
+influx2tsdb_proxy_supervisor_user: root
+influx2tsdb_proxy_supervisor_startsecs: 3
+influx2tsdb_proxy_supervisor_startretries: 3
+
+# 实例列表（支持单机多实例）
 influx2tsdb_proxy_instances:
-  - name: default              # 实例名（用于目录名、supervisor 进程名）
-    pg_dsn: ""                 # PostgreSQL/TimescaleDB 连接字符串（必需）
-    port: 8087                 # HTTP 监听端口
-    pool_size: 10              # 连接池大小
-    verbose: false             # 启用 SQL 和查询详细日志
-    dir: /srv/influx2tsdb-proxy  # 安装目录（可选，默认自动计算）
-    # supervisor 配置（可选，以下有默认值）
-    supervisor_autorestart: true
-    supervisor_autostart: true
-    supervisor_user: root
-    supervisor_startsecs: 3
-    supervisor_startretries: 3
+  - name: default
+    pg_dsn: "postgres://user:pass@localhost:5432/tsdb?sslmode=disable"
+    # dir: /opt/influx2tsdb-proxy-default  # 可选，不设置则自动计算
+    # port: 8086                            # 可选，不设置则自动计算
+    # pool_size: 20                         # 可选，覆盖默认值
+    # verbose: true                         # 可选，覆盖默认值
