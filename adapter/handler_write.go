@@ -6,15 +6,30 @@ import (
 	"net/http"
 )
 
-func HandleWrite(meta *MetaStore) http.HandlerFunc {
+func HandleWrite(meta *MetaStore, dbName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// db parameter (for compatibility, we ignore it and use the configured database)
-		_ = r.URL.Query().Get("db")
+		// Use request db parameter, fall back to startup dbName
+		effectiveDB := dbName
+		if reqDB := r.URL.Query().Get("db"); reqDB != "" {
+			effectiveDB = reqDB
+		}
+
+		if effectiveDB == "" {
+			http.Error(w, "missing db parameter", http.StatusBadRequest)
+			return
+		}
+
+		// Ensure database exists (auto-create on write)
+		if err := meta.EnsureDatabase(effectiveDB); err != nil {
+			log.Printf("[WRITE ERROR] ensure database %s: %v", effectiveDB, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -42,19 +57,19 @@ func HandleWrite(meta *MetaStore) http.HandlerFunc {
 
 		for measurement, recs := range byMeasurement {
 			// Use first record to determine schema
-			if err := meta.EnsureTable(measurement, recs[0].Tags, recs[0].Fields); err != nil {
-				log.Printf("[WRITE ERROR] ensure table %s: %v", measurement, err)
+			if err := meta.EnsureTable(effectiveDB, measurement, recs[0].Tags, recs[0].Fields); err != nil {
+				log.Printf("[WRITE ERROR] ensure table %s.%s: %v", effectiveDB, measurement, err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
-			if err := meta.InsertBatch(measurement, recs); err != nil {
-				log.Printf("[WRITE ERROR] insert %s: %v", measurement, err)
+			if err := meta.InsertBatch(effectiveDB, measurement, recs); err != nil {
+				log.Printf("[WRITE ERROR] insert %s.%s: %v", effectiveDB, measurement, err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
-			log.Printf("[WRITE] %s: %d records", measurement, len(recs))
+			log.Printf("[WRITE] %s.%s: %d records", effectiveDB, measurement, len(recs))
 		}
 
 		w.WriteHeader(http.StatusNoContent)

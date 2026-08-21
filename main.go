@@ -108,15 +108,27 @@ func main() {
 		log.Fatalf("Failed to initialize metadata: %v", err)
 	}
 
+	// Ensure default database exists
+	if err := meta.EnsureDatabase(influxDBName); err != nil {
+		log.Fatalf("Failed to create default database: %v", err)
+	}
+
+	// Migrate existing data from public schema to default database schema
+	if err := meta.MigrateExistingData(influxDBName); err != nil {
+		log.Printf("Warning: data migration failed: %v", err)
+	}
+
 	// Initialize retention policy store
 	retentionStore, err := adapter.NewRetentionStore(ctx, pool)
 	if err != nil {
 		log.Fatalf("Failed to initialize retention store: %v", err)
 	}
+	// Ensure default database has retention policies
+	retentionStore.EnsureDatabasePolicies(influxDBName)
 	// Link retention store to meta store for chunk_time_interval
 	meta.SetRetentionStore(retentionStore)
 	// Initial sync of retention policies to TimescaleDB
-	if err := retentionStore.SyncToTimescaleDB(); err != nil {
+	if err := retentionStore.SyncToTimescaleDB(influxDBName); err != nil {
 		log.Printf("Warning: initial retention sync failed: %v", err)
 	}
 	// Start background retention sync (every 5 minutes)
@@ -128,7 +140,7 @@ func main() {
 	// HTTP routes
 	http.HandleFunc("/ping", adapter.HandlePing)
 	http.HandleFunc("/debug/vars", adapter.HandleDebugVars)
-	http.HandleFunc("/write", adapter.HandleWrite(meta))
+	http.HandleFunc("/write", adapter.HandleWrite(meta, influxDBName))
 	http.HandleFunc("/query", adapter.HandleQuery(influxDBName, meta, retentionStore))
 
 	// Graceful shutdown

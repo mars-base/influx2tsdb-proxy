@@ -16,8 +16,10 @@ type MetaStore struct {
 	ctx            context.Context
 	pool           *pgxpool.Pool
 	mu             sync.RWMutex
-	// Cache: measurement -> table schema
+	// Cache: "db/measurement" -> table schema
 	tables         map[string]*TableSchema
+	// Cache of known database names
+	databases      map[string]bool
 	retentionStore *RetentionStore // optional, for chunk_time_interval
 }
 
@@ -33,9 +35,10 @@ type FieldInfo struct {
 
 func NewMetaStore(ctx context.Context, pool *pgxpool.Pool) *MetaStore {
 	return &MetaStore{
-		ctx:    ctx,
-		pool:   pool,
-		tables: make(map[string]*TableSchema),
+		ctx:       ctx,
+		pool:      pool,
+		tables:    make(map[string]*TableSchema),
+		databases: make(map[string]bool),
 	}
 }
 
@@ -44,9 +47,19 @@ func (m *MetaStore) SetRetentionStore(rs *RetentionStore) {
 	m.retentionStore = rs
 }
 
-// Initialize creates the _influx_meta table and loads existing schemas
+// Initialize creates the metadata tables and loads existing schemas
 func (m *MetaStore) Initialize() error {
-	sql := `CREATE TABLE IF NOT EXISTS _influx_meta (
+	// Create _influx_databases table
+	sql := `CREATE TABLE IF NOT EXISTS _influx_databases (
+		name TEXT PRIMARY KEY,
+		created_at TIMESTAMPTZ DEFAULT NOW()
+	)`
+	if _, err := m.pool.Exec(m.ctx, sql); err != nil {
+		return fmt.Errorf("create _influx_databases: %w", err)
+	}
+
+	// Create _influx_meta table
+	sql = `CREATE TABLE IF NOT EXISTS _influx_meta (
 		measurement TEXT NOT NULL,
 		column_name TEXT NOT NULL,
 		column_type TEXT NOT NULL,
@@ -55,12 +68,27 @@ func (m *MetaStore) Initialize() error {
 	if _, err := m.pool.Exec(m.ctx, sql); err != nil {
 		return fmt.Errorf("create _influx_meta: %w", err)
 	}
-	log.Println("Initialized _influx_meta table")
+
+	// Migrate: add db_name column to _influx_meta if missing
+	var hasDBName bool
+	m.pool.QueryRow(m.ctx,
+		"SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = '_influx_meta' AND column_name = 'db_name')").Scan(&hasDBName)
+	if !hasDBName {
+		if _, err := m.pool.Exec(m.ctx, "ALTER TABLE _influx_meta ADD COLUMN db_name TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("migrate _influx_meta add db_name: %w", err)
+		}
+		// Update primary key to include db_name
+		m.pool.Exec(m.ctx, "ALTER TABLE _influx_meta DROP CONSTRAINT IF EXISTS _influx_meta_pkey")
+		m.pool.Exec(m.ctx, "ALTER TABLE _influx_meta ADD PRIMARY KEY (db_name, measurement, column_name)")
+		log.Println("Migrated _influx_meta: added db_name column")
+	}
+
+	log.Println("Initialized metadata tables")
 	return m.loadSchemas()
 }
 
 func (m *MetaStore) loadSchemas() error {
-	rows, err := m.pool.Query(m.ctx, "SELECT measurement, column_name, column_type FROM _influx_meta ORDER BY measurement, column_name")
+	rows, err := m.pool.Query(m.ctx, "SELECT db_name, measurement, column_name, column_type FROM _influx_meta ORDER BY db_name, measurement, column_name")
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
 			return nil
@@ -70,14 +98,15 @@ func (m *MetaStore) loadSchemas() error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var measurement, colName, colType string
-		if err := rows.Scan(&measurement, &colName, &colType); err != nil {
+		var dbName, measurement, colName, colType string
+		if err := rows.Scan(&dbName, &measurement, &colName, &colType); err != nil {
 			return err
 		}
-		schema, ok := m.tables[measurement]
+		key := dbMeasurementKey(dbName, measurement)
+		schema, ok := m.tables[key]
 		if !ok {
 			schema = &TableSchema{}
-			m.tables[measurement] = schema
+			m.tables[key] = schema
 		}
 		if colType == "tag" {
 			schema.Tags = append(schema.Tags, colName)
@@ -85,32 +114,221 @@ func (m *MetaStore) loadSchemas() error {
 			schema.Fields = append(schema.Fields, colName)
 		}
 	}
-	return rows.Err()
+
+	// Load databases list
+	dbRows, err := m.pool.Query(m.ctx, "SELECT name FROM _influx_databases")
+	if err == nil {
+		defer dbRows.Close()
+		for dbRows.Next() {
+			var name string
+			if err := dbRows.Scan(&name); err == nil {
+				m.databases[name] = true
+			}
+		}
+	}
+
+	log.Printf("Loaded %d measurement schemas, %d databases", len(m.tables), len(m.databases))
+	return nil
 }
 
-// EnsureTable creates the measurement table and hypertable if needed
-func (m *MetaStore) EnsureTable(measurement string, tags map[string]string, fields map[string]interface{}) error {
+// --- Database management ---
+
+// CreateDatabase creates a new InfluxDB database (PostgreSQL schema + metadata)
+func (m *MetaStore) CreateDatabase(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	schema, exists := m.tables[measurement]
+	if m.databases[name] {
+		return nil // already exists
+	}
+
+	// Create PostgreSQL schema
+	schemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, escapeIdent(name))
+	if _, err := m.pool.Exec(m.ctx, schemaSQL); err != nil {
+		return fmt.Errorf("create schema %s: %w", name, err)
+	}
+
+	// Insert into _influx_databases
+	if _, err := m.pool.Exec(m.ctx,
+		"INSERT INTO _influx_databases (name) VALUES ($1) ON CONFLICT DO NOTHING", name); err != nil {
+		return fmt.Errorf("insert _influx_databases: %w", err)
+	}
+
+	m.databases[name] = true
+	log.Printf("Created database: %s", name)
+	return nil
+}
+
+// DropDatabase drops an InfluxDB database (drops schema + cleanup metadata)
+func (m *MetaStore) DropDatabase(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.databases[name] {
+		return fmt.Errorf("database %q not found", name)
+	}
+
+	// Delete from _influx_databases
+	m.pool.Exec(m.ctx, "DELETE FROM _influx_databases WHERE name = $1", name)
+
+	// Drop PostgreSQL schema and all objects within
+	dropSQL := fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, escapeIdent(name))
+	if _, err := m.pool.Exec(m.ctx, dropSQL); err != nil {
+		return fmt.Errorf("drop schema %s: %w", name, err)
+	}
+
+	// Cleanup metadata
+	m.pool.Exec(m.ctx, "DELETE FROM _influx_meta WHERE db_name = $1", name)
+
+	// Remove from cache
+	delete(m.databases, name)
+	for key := range m.tables {
+		if strings.HasPrefix(key, name+"/") {
+			delete(m.tables, key)
+		}
+	}
+
+	log.Printf("Dropped database: %s", name)
+	return nil
+}
+
+// ListDatabases returns all known database names sorted alphabetically
+func (m *MetaStore) ListDatabases() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	names := make([]string, 0, len(m.databases))
+	for name := range m.databases {
+		names = append(names, name)
+	}
+	// Sort
+	for i := 0; i < len(names); i++ {
+		for j := i + 1; j < len(names); j++ {
+			if names[i] > names[j] {
+				names[i], names[j] = names[j], names[i]
+			}
+		}
+	}
+	return names
+}
+
+// DatabaseExists checks if a database exists
+func (m *MetaStore) DatabaseExists(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.databases[name]
+}
+
+// EnsureDatabase ensures a database exists (auto-create on write)
+func (m *MetaStore) EnsureDatabase(name string) error {
+	if m.DatabaseExists(name) {
+		return nil
+	}
+
+	// Create PostgreSQL schema
+	schemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, escapeIdent(name))
+	if _, err := m.pool.Exec(m.ctx, schemaSQL); err != nil {
+		return fmt.Errorf("create schema %s: %w", name, err)
+	}
+
+	// Insert into _influx_databases
+	m.pool.Exec(m.ctx,
+		"INSERT INTO _influx_databases (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+
+	m.mu.Lock()
+	m.databases[name] = true
+	m.mu.Unlock()
+
+	log.Printf("Auto-created database: %s", name)
+	return nil
+}
+
+// MigrateExistingData moves existing public-schema tables to the default database schema.
+// Called on startup for backward compatibility with single-database deployments.
+func (m *MetaStore) MigrateExistingData(defaultDB string) error {
+	if defaultDB == "" {
+		return nil
+	}
+
+	// Ensure the default database exists
+	if err := m.EnsureDatabase(defaultDB); err != nil {
+		return err
+	}
+
+	// Find user tables in public schema (non-internal tables)
+	rows, err := m.pool.Query(m.ctx, `
+		SELECT tablename FROM pg_tables
+		WHERE schemaname = 'public'
+		AND tablename NOT LIKE '\_%'
+	`)
+	if err != nil {
+		return fmt.Errorf("query public tables: %w", err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			continue
+		}
+		tables = append(tables, name)
+	}
+
+	if len(tables) == 0 {
+		return nil
+	}
+
+	log.Printf("Migrating %d tables from public schema to %s...", len(tables), defaultDB)
+
+	for _, table := range tables {
+		// Move table to the database schema
+		moveSQL := fmt.Sprintf(`ALTER TABLE public."%s" SET SCHEMA "%s"`,
+			escapeIdent(table), escapeIdent(defaultDB))
+		if _, err := m.pool.Exec(m.ctx, moveSQL); err != nil {
+			log.Printf("Warning: could not move table %s to schema %s: %v", table, defaultDB, err)
+		} else {
+			log.Printf("Moved table %s to schema %s", table, defaultDB)
+		}
+	}
+
+	// Update _influx_meta: set db_name for rows with empty db_name
+	m.pool.Exec(m.ctx, "UPDATE _influx_meta SET db_name = $1 WHERE db_name = ''", defaultDB)
+
+	// Reload schemas
+	m.loadSchemas()
+
+	return nil
+}
+
+// --- Table and data operations ---
+
+// EnsureTable creates the measurement table and hypertable in the specified database schema
+func (m *MetaStore) EnsureTable(dbName, measurement string, tags map[string]string, fields map[string]interface{}) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := dbMeasurementKey(dbName, measurement)
+	schema, exists := m.tables[key]
 	if !exists {
 		schema = &TableSchema{}
-		m.tables[measurement] = schema
+		m.tables[key] = schema
 	}
+
+	schemaName := escapeIdent(dbName)
 
 	// Check for new tag columns
 	for tagName := range tags {
 		if !containsStr(schema.Tags, tagName) {
 			schema.Tags = append(schema.Tags, tagName)
 			m.pool.Exec(m.ctx,
-				"INSERT INTO _influx_meta (measurement, column_name, column_type) VALUES ($1, $2, 'tag') ON CONFLICT DO NOTHING",
-				measurement, tagName)
+				"INSERT INTO _influx_meta (db_name, measurement, column_name, column_type) VALUES ($1, $2, $3, 'tag') ON CONFLICT DO NOTHING",
+				dbName, measurement, tagName)
 			// Add column to existing table
 			if exists {
 				m.pool.Exec(m.ctx,
-					fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN IF NOT EXISTS "%s" TEXT`,
-						escapeIdent(measurement), escapeIdent(tagName)))
+					fmt.Sprintf(`ALTER TABLE "%s"."%s" ADD COLUMN IF NOT EXISTS "%s" TEXT`,
+						schemaName, escapeIdent(measurement), escapeIdent(tagName)))
 			}
 		}
 	}
@@ -121,13 +339,13 @@ func (m *MetaStore) EnsureTable(measurement string, tags map[string]string, fiel
 			schema.Fields = append(schema.Fields, fieldName)
 			colType := inferColumnType(val)
 			m.pool.Exec(m.ctx,
-				"INSERT INTO _influx_meta (measurement, column_name, column_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-				measurement, fieldName, colType)
+				"INSERT INTO _influx_meta (db_name, measurement, column_name, column_type) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+				dbName, measurement, fieldName, colType)
 			// Add column to existing table
 			if exists {
 				m.pool.Exec(m.ctx,
-					fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN IF NOT EXISTS "%s" DOUBLE PRECISION`,
-						escapeIdent(measurement), escapeIdent(fieldName)))
+					fmt.Sprintf(`ALTER TABLE "%s"."%s" ADD COLUMN IF NOT EXISTS "%s" DOUBLE PRECISION`,
+						schemaName, escapeIdent(measurement), escapeIdent(fieldName)))
 			}
 		}
 	}
@@ -142,43 +360,46 @@ func (m *MetaStore) EnsureTable(measurement string, tags map[string]string, fiel
 		cols = append(cols, fmt.Sprintf(`"%s" DOUBLE PRECISION`, escapeIdent(field)))
 	}
 
-	createSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS \"%s\" (%s)",
-		escapeIdent(measurement), strings.Join(cols, ", "))
+	createSQL := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s"."%s" (%s)`,
+		schemaName, escapeIdent(measurement), strings.Join(cols, ", "))
 	if _, err := m.pool.Exec(m.ctx, createSQL); err != nil {
-		return fmt.Errorf("create table %s: %w", measurement, err)
+		return fmt.Errorf("create table %s.%s: %w", dbName, measurement, err)
 	}
 
 	// Create hypertable
-	hyperSQL := fmt.Sprintf("SELECT create_hypertable('%s', by_range('time'), if_not_exists => true)",
-		escapeIdent(measurement))
+	hyperSQL := fmt.Sprintf(`SELECT create_hypertable('"%s"."%s"', by_range('time'), if_not_exists => true)`,
+		schemaName, escapeIdent(measurement))
 	if _, err := m.pool.Exec(m.ctx, hyperSQL); err != nil {
-		return fmt.Errorf("create hypertable %s: %w", measurement, err)
+		return fmt.Errorf("create hypertable %s.%s: %w", dbName, measurement, err)
 	}
 
 	// Apply chunk_time_interval from retention policy (if available)
 	if m.retentionStore != nil {
-		chunkInterval := m.retentionStore.DefaultChunkInterval()
+		chunkInterval := m.retentionStore.DefaultChunkInterval(dbName)
 		_, _ = m.pool.Exec(m.ctx,
-			fmt.Sprintf("SELECT set_chunk_time_interval('%s', INTERVAL '%s')",
-				escapeIdent(measurement), chunkInterval))
+			fmt.Sprintf(`SELECT set_chunk_time_interval('"%s"."%s"', INTERVAL '%s')`,
+				schemaName, escapeIdent(measurement), chunkInterval))
 	}
 
 	return nil
 }
 
 // InsertBatch inserts records into a measurement table using a transaction
-func (m *MetaStore) InsertBatch(measurement string, records []LineRecord) error {
+func (m *MetaStore) InsertBatch(dbName, measurement string, records []LineRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
 
 	m.mu.RLock()
-	schema := m.tables[measurement]
+	key := dbMeasurementKey(dbName, measurement)
+	schema := m.tables[key]
 	m.mu.RUnlock()
 
 	if schema == nil {
-		return fmt.Errorf("no schema for measurement %s", measurement)
+		return fmt.Errorf("no schema for measurement %s.%s", dbName, measurement)
 	}
+
+	schemaName := escapeIdent(dbName)
 
 	// Build column list: time + tags + fields
 	allCols := make([]string, 0, 1+len(schema.Tags)+len(schema.Fields))
@@ -195,8 +416,8 @@ func (m *MetaStore) InsertBatch(measurement string, records []LineRecord) error 
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 
-	insertSQL := fmt.Sprintf("INSERT INTO \"%s\" (%s) VALUES (%s)",
-		escapeIdent(measurement),
+	insertSQL := fmt.Sprintf(`INSERT INTO "%s"."%s" (%s) VALUES (%s)`,
+		schemaName, escapeIdent(measurement),
 		strings.Join(quotedCols, ", "),
 		strings.Join(placeholders, ", "))
 
@@ -232,9 +453,10 @@ func (m *MetaStore) InsertBatch(measurement string, records []LineRecord) error 
 	return tx.Commit(m.ctx)
 }
 
-// GetMeasurements returns all known measurement names
-func (m *MetaStore) GetMeasurements() ([]string, error) {
-	rows, err := m.pool.Query(m.ctx, "SELECT DISTINCT measurement FROM _influx_meta ORDER BY measurement")
+// GetMeasurements returns all known measurement names for a database
+func (m *MetaStore) GetMeasurements(dbName string) ([]string, error) {
+	rows, err := m.pool.Query(m.ctx,
+		"SELECT DISTINCT measurement FROM _influx_meta WHERE db_name = $1 ORDER BY measurement", dbName)
 	if err != nil {
 		return nil, err
 	}
@@ -252,9 +474,9 @@ func (m *MetaStore) GetMeasurements() ([]string, error) {
 }
 
 // GetTagValues returns distinct values for a tag column
-func (m *MetaStore) GetTagValues(measurement, tagKey string) ([]string, error) {
-	sql := fmt.Sprintf(`SELECT DISTINCT "%s" FROM "%s" WHERE "%s" IS NOT NULL ORDER BY 1 LIMIT 1000`,
-		escapeIdent(tagKey), escapeIdent(measurement), escapeIdent(tagKey))
+func (m *MetaStore) GetTagValues(dbName, measurement, tagKey string) ([]string, error) {
+	sql := fmt.Sprintf(`SELECT DISTINCT "%s" FROM "%s"."%s" WHERE "%s" IS NOT NULL ORDER BY 1 LIMIT 1000`,
+		escapeIdent(tagKey), escapeIdent(dbName), escapeIdent(measurement), escapeIdent(tagKey))
 
 	rows, err := m.pool.Query(m.ctx, sql)
 	if err != nil {
@@ -274,10 +496,10 @@ func (m *MetaStore) GetTagValues(measurement, tagKey string) ([]string, error) {
 }
 
 // GetFields returns field info for a measurement
-func (m *MetaStore) GetFields(measurement string) ([]FieldInfo, error) {
+func (m *MetaStore) GetFields(dbName, measurement string) ([]FieldInfo, error) {
 	rows, err := m.pool.Query(m.ctx,
-		"SELECT column_name, column_type FROM _influx_meta WHERE measurement = $1 AND column_type != 'tag' ORDER BY column_name",
-		measurement)
+		"SELECT column_name, column_type FROM _influx_meta WHERE db_name = $1 AND measurement = $2 AND column_type != 'tag' ORDER BY column_name",
+		dbName, measurement)
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +517,10 @@ func (m *MetaStore) GetFields(measurement string) ([]FieldInfo, error) {
 }
 
 // helper functions
+
+func dbMeasurementKey(dbName, measurement string) string {
+	return dbName + "/" + measurement
+}
 
 func containsStr(slice []string, s string) bool {
 	for _, v := range slice {

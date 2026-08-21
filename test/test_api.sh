@@ -141,11 +141,11 @@ else
 
         if [ "$assert_type" = "status" ]; then
             # pattern is expected HTTP status code
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -G "$URL/query" --data-urlencode "q=$query")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -G "$URL/query" --data-urlencode "db=$DB" --data-urlencode "q=$query")
             assert_status "$desc" "$pattern" "$STATUS"
         else
             # default: contains
-            BODY=$(curl -s -G "$URL/query" --data-urlencode "q=$query")
+            BODY=$(curl -s -G "$URL/query" --data-urlencode "db=$DB" --data-urlencode "q=$query")
             assert_contains "$desc" "$BODY" "$pattern"
         fi
     done < "$DATA_DIR/queries.txt"
@@ -160,14 +160,14 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$URL/query")
 assert_status "/query without q returns 400" "400" "$STATUS"
 
 # POST /query
-STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/query" -d "q=SHOW+DATABASES")
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$URL/query" -d "db=$DB" -d "q=SHOW+DATABASES")
 assert_status "POST /query works" "200" "$STATUS"
 
 # ============================================================
 section "6. Response format validation"
 # ============================================================
 
-BODY=$(curl -s "$URL/query?q=SHOW%20DATABASES")
+BODY=$(curl -s "$URL/query?db=$DB&q=SHOW%20DATABASES")
 VALID=$(python3 -c "
 import sys, json
 try:

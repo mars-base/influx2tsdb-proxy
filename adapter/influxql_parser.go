@@ -26,6 +26,11 @@ func NewConverter(meta *MetaStore, retentionStore *RetentionStore, dbName string
 	return &Converter{meta: meta, retentionStore: retentionStore, dbName: dbName, fromMs: fromMs, toMs: toMs, epoch: epoch}
 }
 
+// qualifiedTable returns a schema-qualified table reference: "dbName"."measurement"
+func (c *Converter) qualifiedTable(measurement string) string {
+	return fmt.Sprintf(`"%s"."%s"`, escapeIdent(c.dbName), escapeIdent(measurement))
+}
+
 // Convert parses an InfluxQL query and returns an InfluxDB-compatible response
 func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 	query = strings.TrimSpace(query)
@@ -34,17 +39,17 @@ func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 	// Route to appropriate handler
 	switch {
 	case strings.HasPrefix(upper, "SHOW DATABASES"):
-		return handleShowDatabases(c.dbName), nil
+		return handleShowDatabases(c.meta), nil
 	case strings.HasPrefix(upper, "SHOW MEASUREMENTS"):
-		return handleShowMeasurements(c.meta), nil
+		return handleShowMeasurements(c.meta, c.dbName), nil
 	case strings.HasPrefix(upper, "SHOW RETENTION"):
 		return c.handleShowRetentionPolicies(), nil
 	case strings.HasPrefix(upper, "SHOW TAG VALUES"):
-		return handleShowTagValues(c.meta, query), nil
+		return handleShowTagValues(c.meta, c.dbName, query), nil
 	case strings.HasPrefix(upper, "SHOW TAG KEYS"):
-		return handleShowTagKeys(c.meta, query), nil
+		return handleShowTagKeys(c.meta, c.dbName, query), nil
 	case strings.HasPrefix(upper, "SHOW FIELD KEYS"):
-		return handleShowFieldKeys(c.meta, query), nil
+		return handleShowFieldKeys(c.meta, c.dbName, query), nil
 	case strings.HasPrefix(upper, "CREATE RETENTION POLICY"):
 		return c.handleCreateRetentionPolicy(query), nil
 	case strings.HasPrefix(upper, "ALTER RETENTION POLICY"):
@@ -54,9 +59,9 @@ func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 	case strings.HasPrefix(upper, "DROP MEASUREMENT"):
 		return c.handleDropMeasurement(query)
 	case strings.HasPrefix(upper, "CREATE DATABASE"):
-		return emptyResult(), nil
+		return c.handleCreateDatabase(query), nil
 	case strings.HasPrefix(upper, "DROP DATABASE"):
-		return emptyResult(), nil
+		return c.handleDropDatabase(query), nil
 	case strings.HasPrefix(upper, "SELECT"):
 		return c.handleSelect(query)
 	default:
@@ -79,7 +84,7 @@ func (c *Converter) handleShowRetentionPolicies() *InfluxDBResponse {
 		}
 	}
 
-	policies := c.retentionStore.ShowPolicies()
+	policies := c.retentionStore.ShowPolicies(c.dbName)
 
 	values := make([][]interface{}, 0, len(policies))
 	for _, rp := range policies {
@@ -99,6 +104,18 @@ func (c *Converter) handleShowRetentionPolicies() *InfluxDBResponse {
 	}
 }
 
+// extractOnDB extracts the database name from the ON "db" clause in retention policy queries
+// e.g., CREATE RETENTION POLICY "rp" ON "testdb" DURATION 7d ... → "testdb"
+func extractOnDB(query string) string {
+	upper := strings.ToUpper(query)
+	onIdx := strings.Index(upper, " ON ")
+	if onIdx < 0 {
+		return ""
+	}
+	afterOn := strings.TrimSpace(query[onIdx+4:])
+	return extractFirstToken(afterOn)
+}
+
 // handleCreateRetentionPolicy handles CREATE RETENTION POLICY
 // Syntax: CREATE RETENTION POLICY "name" ON "db" DURATION 7d REPLICATION 1 DEFAULT
 func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse {
@@ -109,6 +126,12 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 	upper := strings.ToUpper(query)
 	rest := query[len("CREATE RETENTION POLICY"):]
 	upperRest := upper[len("CREATE RETENTION POLICY"):]
+
+	// Extract database name from ON clause
+	targetDB := extractOnDB(rest)
+	if targetDB == "" {
+		targetDB = c.dbName
+	}
 
 	// Extract policy name (first token, may be quoted)
 	name := extractFirstToken(strings.TrimSpace(rest))
@@ -135,12 +158,12 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 	}
 	isDefault := strings.Contains(afterRepl, "DEFAULT")
 
-	if err := c.retentionStore.CreatePolicy(name, duration, isDefault); err != nil {
+	if err := c.retentionStore.CreatePolicy(targetDB, name, duration, isDefault); err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
 
 	// Sync immediately to TimescaleDB
-	if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
+	if err := c.retentionStore.SyncToTimescaleDB(targetDB); err != nil {
 		log.Printf("Warning: retention sync after CREATE failed: %v", err)
 	}
 
@@ -158,6 +181,12 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 	rest := query[len("ALTER RETENTION POLICY"):]
 	upperRest := upper[len("ALTER RETENTION POLICY"):]
 
+	// Extract database name from ON clause
+	targetDB := extractOnDB(rest)
+	if targetDB == "" {
+		targetDB = c.dbName
+	}
+
 	// Extract policy name
 	name := extractFirstToken(strings.TrimSpace(rest))
 	if name == "" {
@@ -172,7 +201,7 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 		if duration == "" {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION value"}}}
 		}
-		if err := c.retentionStore.AlterPolicy(name, duration); err != nil {
+		if err := c.retentionStore.AlterPolicy(targetDB, name, duration); err != nil {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 		}
 	}
@@ -188,14 +217,14 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 	hasAlterDefault := strings.Contains(alterTail, "DEFAULT")
 
 	if hasAlterDefault {
-		if err := c.retentionStore.SetDefault(name); err != nil {
+		if err := c.retentionStore.SetDefault(targetDB, name); err != nil {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 		}
 	}
 
 	// Sync to TimescaleDB if anything changed
 	if durIdx >= 0 || hasAlterDefault {
-		if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
+		if err := c.retentionStore.SyncToTimescaleDB(targetDB); err != nil {
 			log.Printf("Warning: retention sync after ALTER failed: %v", err)
 		}
 	}
@@ -211,24 +240,75 @@ func (c *Converter) handleDropRetentionPolicy(query string) *InfluxDBResponse {
 	}
 
 	rest := query[len("DROP RETENTION POLICY"):]
+
+	// Extract database name from ON clause
+	targetDB := extractOnDB(rest)
+	if targetDB == "" {
+		targetDB = c.dbName
+	}
+
 	name := extractFirstToken(strings.TrimSpace(rest))
 	if name == "" {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing retention policy name"}}}
 	}
 
-	if err := c.retentionStore.DropPolicy(name); err != nil {
+	if err := c.retentionStore.DropPolicy(targetDB, name); err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
 
 	// Sync immediately to TimescaleDB (removes retention jobs since no default policy remains)
-	if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
+	if err := c.retentionStore.SyncToTimescaleDB(targetDB); err != nil {
 		log.Printf("Warning: retention sync after DROP failed: %v", err)
 	}
 
 	return emptyResult()
 }
 
-func handleShowTagKeys(meta *MetaStore, query string) *InfluxDBResponse {
+// handleCreateDatabase handles CREATE DATABASE
+// Syntax: CREATE DATABASE "name"
+func (c *Converter) handleCreateDatabase(query string) *InfluxDBResponse {
+	// Extract database name from query
+	rest := strings.TrimSpace(query[len("CREATE DATABASE"):])
+	name := extractFirstToken(rest)
+	if name == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing database name"}}}
+	}
+
+	if err := c.meta.CreateDatabase(name); err != nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+	}
+
+	// Ensure retention policies are initialized for this database
+	if c.retentionStore != nil {
+		c.retentionStore.EnsureDatabasePolicies(name)
+	}
+
+	return emptyResult()
+}
+
+// handleDropDatabase handles DROP DATABASE
+// Syntax: DROP DATABASE "name"
+func (c *Converter) handleDropDatabase(query string) *InfluxDBResponse {
+	// Extract database name from query
+	rest := strings.TrimSpace(query[len("DROP DATABASE"):])
+	name := extractFirstToken(rest)
+	if name == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing database name"}}}
+	}
+
+	if err := c.meta.DropDatabase(name); err != nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+	}
+
+	// Clean up retention policies for this database
+	if c.retentionStore != nil {
+		c.retentionStore.DropDatabasePolicies(name)
+	}
+
+	return emptyResult()
+}
+
+func handleShowTagKeys(meta *MetaStore, dbName, query string) *InfluxDBResponse {
 	upper := strings.ToUpper(query)
 	fromIdx := strings.Index(upper, "FROM")
 	if fromIdx < 0 {
@@ -239,8 +319,8 @@ func handleShowTagKeys(meta *MetaStore, query string) *InfluxDBResponse {
 
 	// Get tag columns from _influx_meta
 	rows, err := meta.pool.Query(meta.ctx,
-		"SELECT column_name FROM _influx_meta WHERE measurement = $1 AND column_type = 'tag' ORDER BY column_name",
-		measurement)
+		"SELECT column_name FROM _influx_meta WHERE db_name = $1 AND measurement = $2 AND column_type = 'tag' ORDER BY column_name",
+		dbName, measurement)
 	if err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
@@ -278,14 +358,18 @@ func (c *Converter) handleDropMeasurement(query string) (*InfluxDBResponse, erro
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing measurement name"}}}, nil
 	}
 
-	// Drop the table
-	_, err := c.meta.pool.Exec(c.meta.ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, measurement))
+	// Drop the table with schema qualification
+	dropSQL := fmt.Sprintf(`DROP TABLE IF EXISTS "%s"."%s"`,
+		escapeIdent(c.dbName), escapeIdent(measurement))
+	_, err := c.meta.pool.Exec(c.meta.ctx, dropSQL)
 	if err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}, nil
 	}
 
-	// Remove metadata
-	_, err = c.meta.pool.Exec(c.meta.ctx, "DELETE FROM _influx_meta WHERE measurement = $1", measurement)
+	// Remove metadata with db_name filter
+	_, err = c.meta.pool.Exec(c.meta.ctx,
+		"DELETE FROM _influx_meta WHERE db_name = $1 AND measurement = $2",
+		c.dbName, measurement)
 	if err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}, nil
 	}
@@ -466,7 +550,7 @@ func (c *Converter) parseSelectQuery(query string) selectQuery {
 //	) AS t
 func (c *Converter) buildLastFirstLateralSQL(q selectQuery) string {
 	var sql strings.Builder
-	table := q.measurement
+	fullTable := c.qualifiedTable(q.measurement)
 	where := c.convertWhere(q.where)
 
 	// Build converted field list (last("f") AS alias → "f" AS "alias")
@@ -497,8 +581,8 @@ func (c *Converter) buildLastFirstLateralSQL(q selectQuery) string {
 
 	// FROM: distinct tags subquery
 	sql.WriteString(" FROM (")
-	sql.WriteString(fmt.Sprintf(`SELECT DISTINCT %s FROM "%s"`,
-		joinQuotedTags(q.groupByTags), table))
+	sql.WriteString(fmt.Sprintf(`SELECT DISTINCT %s FROM %s`,
+		joinQuotedTags(q.groupByTags), fullTable))
 	if where != "" {
 		sql.WriteString(fmt.Sprintf(" WHERE %s", where))
 	}
@@ -506,7 +590,7 @@ func (c *Converter) buildLastFirstLateralSQL(q selectQuery) string {
 
 	// CROSS JOIN LATERAL
 	sql.WriteString(" CROSS JOIN LATERAL (")
-	sql.WriteString(fmt.Sprintf(`SELECT %s FROM "%s"`, lateralSelect, table))
+	sql.WriteString(fmt.Sprintf(`SELECT %s FROM %s`, lateralSelect, fullTable))
 	if where != "" {
 		sql.WriteString(fmt.Sprintf(" WHERE %s AND %s", where, strings.Join(tagFilters, " AND ")))
 	} else {
@@ -576,8 +660,8 @@ func (c *Converter) buildSimpleSQL(q selectQuery) string {
 
 	sql.WriteString(strings.Join(selectFields, ", "))
 
-	// FROM clause
-	sql.WriteString(fmt.Sprintf(` FROM "%s"`, q.measurement))
+	// FROM clause with schema-qualified table
+	sql.WriteString(fmt.Sprintf(` FROM %s`, c.qualifiedTable(q.measurement)))
 
 	// WHERE clause
 	where := c.convertWhere(q.where)

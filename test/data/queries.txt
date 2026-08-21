@@ -7,7 +7,7 @@
 # SHOW queries
 # ============================================================
 SHOW DATABASES has series|SHOW DATABASES|"series"|contains
-SHOW DATABASES returns db name|SHOW DATABASES|"tsdb"|contains
+SHOW DATABASES returns db name|SHOW DATABASES|testdb|contains
 SHOW MEASUREMENTS has series|SHOW MEASUREMENTS|"series"|contains
 SHOW MEASUREMENTS returns test measurement|SHOW MEASUREMENTS|${MEASUREMENT}|contains
 SHOW TAG KEYS has server_id|SHOW TAG KEYS FROM "${MEASUREMENT}"|server_id|contains

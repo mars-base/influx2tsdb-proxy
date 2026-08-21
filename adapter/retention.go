@@ -29,12 +29,17 @@ type RetentionStore struct {
 	ctx       context.Context
 	pool      *pgxpool.Pool
 	mu        sync.RWMutex
-	policies  map[string]*RetentionPolicy // policy name -> policy
+	policies  map[string]*RetentionPolicy // "dbName/name" -> policy
 	lastSync  time.Time
 	syncEvery time.Duration
 }
 
-// NewRetentionStore creates and initializes the retention store
+// policyKey generates a cache key for a policy
+func policyKey(dbName, name string) string {
+	return dbName + "/" + name
+}
+
+// NewRetentionStore creates and initialized the retention store
 func NewRetentionStore(ctx context.Context, pool *pgxpool.Pool) (*RetentionStore, error) {
 	rs := &RetentionStore{
 		ctx:       ctx,
@@ -75,42 +80,25 @@ func (rs *RetentionStore) initialize() error {
 		log.Println("Migrated _retention_policy: measurement -> name")
 	}
 
-	// Ensure exactly one default policy exists.
-	// Count current defaults; if none, set autogen as default.
-	var defaultCount int
-	rs.pool.QueryRow(rs.ctx, "SELECT COUNT(*) FROM _retention_policy WHERE is_default = TRUE").Scan(&defaultCount)
-
-	var hasAutogen bool
-	rs.pool.QueryRow(rs.ctx, "SELECT EXISTS(SELECT 1 FROM _retention_policy WHERE name = 'autogen')").Scan(&hasAutogen)
-	if !hasAutogen {
-		_, err := rs.pool.Exec(rs.ctx,
-			`INSERT INTO _retention_policy (name, duration, duration_ns, is_default)
-			VALUES ('autogen', '0s', 0, $1)
-			ON CONFLICT (name) DO UPDATE SET is_default = EXCLUDED.is_default`, defaultCount == 0)
-		if err != nil {
-			return fmt.Errorf("insert autogen policy: %w", err)
+	// Migrate: add db_name column if missing
+	var hasDBName bool
+	rs.pool.QueryRow(rs.ctx,
+		"SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = '_retention_policy' AND column_name = 'db_name')").Scan(&hasDBName)
+	if !hasDBName {
+		if _, err := rs.pool.Exec(rs.ctx, "ALTER TABLE _retention_policy ADD COLUMN db_name TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("migrate _retention_policy add db_name: %w", err)
 		}
-		log.Printf("Created autogen retention policy (default=%v)", defaultCount == 0)
-	} else if defaultCount == 0 {
-		// No default at all — restore autogen as default
-		if _, err := rs.pool.Exec(rs.ctx, "UPDATE _retention_policy SET is_default = TRUE WHERE name = 'autogen'"); err != nil {
-			return fmt.Errorf("restore autogen as default: %w", err)
-		}
-		log.Println("Restored autogen as default (no default found)")
-	} else if defaultCount > 1 {
-		// Multiple defaults (crash recovery) — keep only the first one
-		if _, err := rs.pool.Exec(rs.ctx, `UPDATE _retention_policy SET is_default = FALSE
-			WHERE name NOT IN (SELECT name FROM _retention_policy WHERE is_default = TRUE ORDER BY name LIMIT 1)`); err != nil {
-			return fmt.Errorf("fix multiple defaults: %w", err)
-		}
-		log.Printf("Fixed multiple defaults (kept first)")
+		// Update primary key to include db_name
+		rs.pool.Exec(rs.ctx, "ALTER TABLE _retention_policy DROP CONSTRAINT IF EXISTS _retention_policy_pkey")
+		rs.pool.Exec(rs.ctx, "ALTER TABLE _retention_policy ADD PRIMARY KEY (db_name, name)")
+		log.Println("Migrated _retention_policy: added db_name column")
 	}
 
 	log.Println("Initialized _retention_policy table")
 
 	// Load existing policies
 	rows, err := rs.pool.Query(rs.ctx,
-		"SELECT name, duration, duration_ns, is_default, created_at FROM _retention_policy ORDER BY name")
+		"SELECT db_name, name, duration, duration_ns, is_default, created_at FROM _retention_policy ORDER BY db_name, name")
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
 			return nil
@@ -121,10 +109,10 @@ func (rs *RetentionStore) initialize() error {
 
 	for rows.Next() {
 		var rp RetentionPolicy
-		if err := rows.Scan(&rp.Name, &rp.Duration, &rp.DurationNs, &rp.IsDefault, &rp.CreatedAt); err != nil {
+		if err := rows.Scan(&rp.DBName, &rp.Name, &rp.Duration, &rp.DurationNs, &rp.IsDefault, &rp.CreatedAt); err != nil {
 			return err
 		}
-		rs.policies[rp.Name] = &rp
+		rs.policies[policyKey(rp.DBName, rp.Name)] = &rp
 	}
 	log.Printf("Loaded %d retention policies", len(rs.policies))
 	return rows.Err()
@@ -140,7 +128,7 @@ func (rs *RetentionStore) RunSyncLoop(intervalMinutes int) {
 	for {
 		select {
 		case <-ticker.C:
-			if err := rs.SyncToTimescaleDB(); err != nil {
+			if err := rs.SyncAllDatabases(); err != nil {
 				log.Printf("Retention sync error: %v", err)
 			}
 		case <-rs.ctx.Done():
@@ -150,8 +138,63 @@ func (rs *RetentionStore) RunSyncLoop(intervalMinutes int) {
 	}
 }
 
-// CreatePolicy creates or updates a retention policy
-func (rs *RetentionStore) CreatePolicy(name string, duration string, isDefault bool) error {
+// EnsureDatabasePolicies ensures the default autogen policy exists for a database
+func (rs *RetentionStore) EnsureDatabasePolicies(dbName string) error {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	key := policyKey(dbName, "autogen")
+	if _, exists := rs.policies[key]; exists {
+		return nil
+	}
+
+	// Check if any default exists for this database
+	var defaultCount int
+	rs.pool.QueryRow(rs.ctx,
+		"SELECT COUNT(*) FROM _retention_policy WHERE db_name = $1 AND is_default = TRUE", dbName).Scan(&defaultCount)
+
+	// Insert autogen as default if no default exists
+	isDefault := defaultCount == 0
+	_, err := rs.pool.Exec(rs.ctx,
+		`INSERT INTO _retention_policy (db_name, name, duration, duration_ns, is_default)
+		VALUES ($1, 'autogen', '0s', 0, $2)
+		ON CONFLICT (db_name, name) DO NOTHING`, dbName, isDefault)
+	if err != nil {
+		return fmt.Errorf("insert autogen policy for %s: %w", dbName, err)
+	}
+
+	rs.policies[key] = &RetentionPolicy{
+		Name:       "autogen",
+		DBName:     dbName,
+		Duration:   "0s",
+		DurationNs: 0,
+		IsDefault:  isDefault,
+		CreatedAt:  time.Now(),
+	}
+
+	log.Printf("Created autogen retention policy for database %s (default=%v)", dbName, isDefault)
+	return nil
+}
+
+// DropDatabasePolicies removes all retention policies for a database
+func (rs *RetentionStore) DropDatabasePolicies(dbName string) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	rs.pool.Exec(rs.ctx, "DELETE FROM _retention_policy WHERE db_name = $1", dbName)
+
+	// Remove from cache
+	for key, rp := range rs.policies {
+		if rp.DBName == dbName {
+			delete(rs.policies, key)
+		}
+	}
+
+	log.Printf("Dropped all retention policies for database %s", dbName)
+}
+
+// CreatePolicy creates or updates a retention policy for a database
+func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault bool) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -161,37 +204,41 @@ func (rs *RetentionStore) CreatePolicy(name string, duration string, isDefault b
 		return fmt.Errorf("invalid duration %q: %w", duration, err)
 	}
 
-	// If is_default is true, clear other defaults first
+	// If is_default is true, clear other defaults for this database
 	if isDefault {
 		if _, err := rs.pool.Exec(rs.ctx,
-			"UPDATE _retention_policy SET is_default = FALSE WHERE is_default = TRUE"); err != nil {
+			"UPDATE _retention_policy SET is_default = FALSE WHERE db_name = $1 AND is_default = TRUE", dbName); err != nil {
 			return fmt.Errorf("clear default: %w", err)
 		}
-		// Update cache: clear all other defaults
+		// Update cache: clear all other defaults for this database
 		for _, rp := range rs.policies {
-			rp.IsDefault = false
+			if rp.DBName == dbName {
+				rp.IsDefault = false
+			}
 		}
 	}
 
 	// Upsert policy
-	sql := `INSERT INTO _retention_policy (name, duration, duration_ns, is_default)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (name) DO UPDATE
+	sql := `INSERT INTO _retention_policy (db_name, name, duration, duration_ns, is_default)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (db_name, name) DO UPDATE
 		SET duration = EXCLUDED.duration,
 		    duration_ns = EXCLUDED.duration_ns,
 		    is_default = EXCLUDED.is_default`
-	if _, err := rs.pool.Exec(rs.ctx, sql, name, duration, durationNs, isDefault); err != nil {
+	if _, err := rs.pool.Exec(rs.ctx, sql, dbName, name, duration, durationNs, isDefault); err != nil {
 		return fmt.Errorf("upsert policy: %w", err)
 	}
 
 	// Update cache (preserve CreatedAt if policy already exists)
-	if existing, ok := rs.policies[name]; ok {
+	key := policyKey(dbName, name)
+	if existing, ok := rs.policies[key]; ok {
 		existing.Duration = duration
 		existing.DurationNs = durationNs
 		existing.IsDefault = isDefault
 	} else {
-		rs.policies[name] = &RetentionPolicy{
+		rs.policies[key] = &RetentionPolicy{
 			Name:       name,
+			DBName:     dbName,
 			Duration:   duration,
 			DurationNs: durationNs,
 			IsDefault:  isDefault,
@@ -201,33 +248,34 @@ func (rs *RetentionStore) CreatePolicy(name string, duration string, isDefault b
 
 	// Reload all policies from DB to sync is_default changes
 	rows, err := rs.pool.Query(rs.ctx,
-		"SELECT name, is_default FROM _retention_policy")
+		"SELECT name, is_default FROM _retention_policy WHERE db_name = $1", dbName)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var pName string
 			var pDefault bool
 			if err := rows.Scan(&pName, &pDefault); err == nil {
-				if p, ok := rs.policies[pName]; ok {
+				if p, ok := rs.policies[policyKey(dbName, pName)]; ok {
 					p.IsDefault = pDefault
 				}
 			}
 		}
 	}
 
-	log.Printf("Created/updated retention policy: %s duration=%s default=%v", name, duration, isDefault)
+	log.Printf("Created/updated retention policy: %s.%s duration=%s default=%v", dbName, name, duration, isDefault)
 	return nil
 }
 
 // AlterPolicy updates an existing retention policy
-func (rs *RetentionStore) AlterPolicy(name string, duration string) error {
+func (rs *RetentionStore) AlterPolicy(dbName, name, duration string) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
 	// Check if exists
-	existing, ok := rs.policies[name]
+	key := policyKey(dbName, name)
+	existing, ok := rs.policies[key]
 	if !ok {
-		return fmt.Errorf("retention policy %q not found", name)
+		return fmt.Errorf("retention policy %q not found in database %q", name, dbName)
 	}
 
 	// Parse duration
@@ -237,8 +285,8 @@ func (rs *RetentionStore) AlterPolicy(name string, duration string) error {
 	}
 
 	// Update
-	sql := `UPDATE _retention_policy SET duration = $2, duration_ns = $3 WHERE name = $1`
-	if _, err := rs.pool.Exec(rs.ctx, sql, name, duration, durationNs); err != nil {
+	sql := `UPDATE _retention_policy SET duration = $3, duration_ns = $4 WHERE db_name = $1 AND name = $2`
+	if _, err := rs.pool.Exec(rs.ctx, sql, dbName, name, duration, durationNs); err != nil {
 		return fmt.Errorf("update policy: %w", err)
 	}
 
@@ -246,49 +294,53 @@ func (rs *RetentionStore) AlterPolicy(name string, duration string) error {
 	existing.Duration = duration
 	existing.DurationNs = durationNs
 
-	log.Printf("Altered retention policy: %s duration=%s", name, duration)
+	log.Printf("Altered retention policy: %s.%s duration=%s", dbName, name, duration)
 	return nil
 }
 
-// SetDefault marks the given policy as default and clears all others
-func (rs *RetentionStore) SetDefault(name string) error {
+// SetDefault marks the given policy as default and clears all others in the same database
+func (rs *RetentionStore) SetDefault(dbName, name string) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
-	if _, ok := rs.policies[name]; !ok {
-		return fmt.Errorf("retention policy %q not found", name)
+	key := policyKey(dbName, name)
+	if _, ok := rs.policies[key]; !ok {
+		return fmt.Errorf("retention policy %q not found in database %q", name, dbName)
 	}
 
-	// Clear all defaults in DB
+	// Clear all defaults in this database
 	if _, err := rs.pool.Exec(rs.ctx,
-		"UPDATE _retention_policy SET is_default = FALSE WHERE is_default = TRUE"); err != nil {
+		"UPDATE _retention_policy SET is_default = FALSE WHERE db_name = $1 AND is_default = TRUE", dbName); err != nil {
 		return fmt.Errorf("clear defaults: %w", err)
 	}
 
 	// Set new default
 	if _, err := rs.pool.Exec(rs.ctx,
-		"UPDATE _retention_policy SET is_default = TRUE WHERE name = $1", name); err != nil {
+		"UPDATE _retention_policy SET is_default = TRUE WHERE db_name = $1 AND name = $2", dbName, name); err != nil {
 		return fmt.Errorf("set default: %w", err)
 	}
 
 	// Update cache
 	for _, rp := range rs.policies {
-		rp.IsDefault = rp.Name == name
+		if rp.DBName == dbName {
+			rp.IsDefault = rp.Name == name
+		}
 	}
 
-	log.Printf("Set default retention policy: %s", name)
+	log.Printf("Set default retention policy: %s.%s", dbName, name)
 	return nil
 }
 
 // DropPolicy removes a retention policy
-func (rs *RetentionStore) DropPolicy(name string) error {
+func (rs *RetentionStore) DropPolicy(dbName, name string) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
 	// Check if exists
-	policy, ok := rs.policies[name]
+	key := policyKey(dbName, name)
+	policy, ok := rs.policies[key]
 	if !ok {
-		return fmt.Errorf("retention policy %q not found", name)
+		return fmt.Errorf("retention policy %q not found in database %q", name, dbName)
 	}
 
 	// InfluxDB does not allow dropping the default retention policy
@@ -298,61 +350,63 @@ func (rs *RetentionStore) DropPolicy(name string) error {
 
 	// Delete from table
 	if _, err := rs.pool.Exec(rs.ctx,
-		"DELETE FROM _retention_policy WHERE name = $1", name); err != nil {
+		"DELETE FROM _retention_policy WHERE db_name = $1 AND name = $2", dbName, name); err != nil {
 		return fmt.Errorf("delete policy: %w", err)
 	}
 
 	// Update cache
-	delete(rs.policies, name)
+	delete(rs.policies, key)
 
-	log.Printf("Dropped retention policy: %s", name)
+	log.Printf("Dropped retention policy: %s.%s", dbName, name)
 	return nil
 }
 
-// ShowPolicies returns all retention policies sorted by name
-func (rs *RetentionStore) ShowPolicies() []RetentionPolicy {
+// ShowPolicies returns all retention policies for a database, sorted by name
+func (rs *RetentionStore) ShowPolicies(dbName string) []RetentionPolicy {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
-	names := make([]string, 0, len(rs.policies))
-	for name := range rs.policies {
-		names = append(names, name)
+	var names []string
+	for key, rp := range rs.policies {
+		if rp.DBName == dbName {
+			names = append(names, rp.Name)
+			_ = key
+		}
 	}
 	sort.Strings(names)
 
-	result := make([]RetentionPolicy, 0, len(rs.policies))
+	result := make([]RetentionPolicy, 0, len(names))
 	for _, name := range names {
-		result = append(result, *rs.policies[name])
+		result = append(result, *rs.policies[policyKey(dbName, name)])
 	}
 	return result
 }
 
-// SyncToTimescaleDB applies the default retention policy to all hypertables.
-// InfluxDB retention policy is per-database, affecting all measurements.
-func (rs *RetentionStore) SyncToTimescaleDB() error {
+// SyncToTimescaleDB applies the default retention policy to all hypertables in a database schema.
+func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
-	// Find the default policy (first one marked default, or first non-zero duration)
+	// Find the default policy for this database
 	var defaultPolicy *RetentionPolicy
 	for _, rp := range rs.policies {
-		if rp.IsDefault {
+		if rp.DBName == dbName && rp.IsDefault {
 			defaultPolicy = rp
 			break
 		}
 	}
 	if defaultPolicy == nil {
 		for _, rp := range rs.policies {
-			if rp.DurationNs > 0 {
+			if rp.DBName == dbName && rp.DurationNs > 0 {
 				defaultPolicy = rp
 				break
 			}
 		}
 	}
 
-	// Get all hypertables
+	// Get all hypertables in the specified schema
 	rows, err := rs.pool.Query(rs.ctx,
-		"SELECT hypertable_name FROM timescaledb_information.hypertables")
+		"SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = $1", dbName)
 	if err != nil {
 		return fmt.Errorf("query hypertables: %w", err)
 	}
@@ -372,12 +426,14 @@ func (rs *RetentionStore) SyncToTimescaleDB() error {
 	}
 	rows.Close()
 
-	log.Printf("Syncing retention policies to %d hypertables...", len(hypertables))
+	log.Printf("Syncing retention policies to %d hypertables in schema %s...", len(hypertables), dbName)
 
 	for _, htName := range hypertables {
+		fullName := fmt.Sprintf(`"%s"."%s"`, escapeIdent(dbName), escapeIdent(htName))
+
 		// Remove existing retention policy (if any)
 		_, _ = rs.pool.Exec(rs.ctx,
-			fmt.Sprintf("SELECT remove_retention_policy('%s')", htName))
+			fmt.Sprintf("SELECT remove_retention_policy('%s')", fullName))
 
 		// Apply default policy if it exists and has a valid duration
 		if defaultPolicy != nil && defaultPolicy.DurationNs > 0 {
@@ -385,22 +441,22 @@ func (rs *RetentionStore) SyncToTimescaleDB() error {
 			interval := fmt.Sprintf("%d seconds", durationSec)
 
 			_, err = rs.pool.Exec(rs.ctx,
-				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', if_not_exists => true)", htName, interval))
+				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', if_not_exists => true)", fullName, interval))
 			if err != nil {
-				log.Printf("Add retention policy for %s: %v", htName, err)
+				log.Printf("Add retention policy for %s: %v", fullName, err)
 				continue
 			}
-			log.Printf("Applied retention policy: %s -> %s (from %s)", htName, interval, defaultPolicy.Name)
+			log.Printf("Applied retention policy: %s -> %s (from %s)", fullName, interval, defaultPolicy.Name)
 		}
 
 		// Sync chunk_time_interval to match shardGroupDuration
-		chunkInterval := rs.DefaultChunkInterval()
+		chunkInterval := rs.DefaultChunkInterval(dbName)
 		_, err = rs.pool.Exec(rs.ctx,
-			fmt.Sprintf("SELECT set_chunk_time_interval('%s', INTERVAL '%s')", htName, chunkInterval))
+			fmt.Sprintf("SELECT set_chunk_time_interval('%s', INTERVAL '%s')", fullName, chunkInterval))
 		if err != nil {
-			log.Printf("Set chunk_time_interval for %s: %v", htName, err)
+			log.Printf("Set chunk_time_interval for %s: %v", fullName, err)
 		} else {
-			log.Printf("Applied chunk_time_interval: %s -> %s", htName, chunkInterval)
+			log.Printf("Applied chunk_time_interval: %s -> %s", fullName, chunkInterval)
 		}
 	}
 
@@ -408,23 +464,41 @@ func (rs *RetentionStore) SyncToTimescaleDB() error {
 	return nil
 }
 
+// SyncAllDatabases syncs retention policies for all known databases
+func (rs *RetentionStore) SyncAllDatabases() error {
+	rs.mu.RLock()
+	// Collect unique database names
+	dbSet := make(map[string]bool)
+	for _, rp := range rs.policies {
+		dbSet[rp.DBName] = true
+	}
+	rs.mu.RUnlock()
+
+	for dbName := range dbSet {
+		if err := rs.SyncToTimescaleDB(dbName); err != nil {
+			log.Printf("Retention sync error for %s: %v", dbName, err)
+		}
+	}
+	return nil
+}
+
 // DefaultChunkInterval returns the chunk_time_interval based on the default
-// retention policy duration (matches InfluxDB's shardGroupDuration logic).
+// retention policy duration for a specific database.
 // Returns "1 week" if no policy is set.
-func (rs *RetentionStore) DefaultChunkInterval() string {
+func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
 	var defaultPolicy *RetentionPolicy
 	for _, rp := range rs.policies {
-		if rp.IsDefault {
+		if rp.DBName == dbName && rp.IsDefault {
 			defaultPolicy = rp
 			break
 		}
 	}
 	if defaultPolicy == nil {
 		for _, rp := range rs.policies {
-			if rp.DurationNs > 0 {
+			if rp.DBName == dbName && rp.DurationNs > 0 {
 				defaultPolicy = rp
 				break
 			}

@@ -75,22 +75,27 @@ func emptyResult() *InfluxDBResponse {
 	}
 }
 
-// handleShowDatabases returns available databases
-func handleShowDatabases(dbName string) *InfluxDBResponse {
+// handleShowDatabases returns all registered databases
+func handleShowDatabases(meta *MetaStore) *InfluxDBResponse {
+	databases := meta.ListDatabases()
+	values := make([][]interface{}, len(databases))
+	for i, db := range databases {
+		values[i] = []interface{}{db}
+	}
 	return &InfluxDBResponse{
 		Results: []InfluxDBResult{{
 			Series: []InfluxDBSeries{{
 				Name:    "databases",
 				Columns: []string{"name"},
-				Values:  [][]interface{}{{dbName}},
+				Values:  values,
 			}},
 		}},
 	}
 }
 
-// handleShowMeasurements returns all measurement names
-func handleShowMeasurements(meta *MetaStore) *InfluxDBResponse {
-	measurements, err := meta.GetMeasurements()
+// handleShowMeasurements returns all measurement names for a database
+func handleShowMeasurements(meta *MetaStore, dbName string) *InfluxDBResponse {
+	measurements, err := meta.GetMeasurements(dbName)
 	if err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
@@ -110,7 +115,7 @@ func handleShowMeasurements(meta *MetaStore) *InfluxDBResponse {
 }
 
 // handleShowTagValues returns distinct tag values
-func handleShowTagValues(meta *MetaStore, query string) *InfluxDBResponse {
+func handleShowTagValues(meta *MetaStore, dbName, query string) *InfluxDBResponse {
 	upper := strings.ToUpper(query)
 
 	// Extract measurement from FROM clause
@@ -130,7 +135,7 @@ func handleShowTagValues(meta *MetaStore, query string) *InfluxDBResponse {
 	afterKey = strings.TrimLeft(afterKey, "= ")
 	tagKey := extractFirstToken(afterKey)
 
-	values, err := meta.GetTagValues(measurement, tagKey)
+	values, err := meta.GetTagValues(dbName, measurement, tagKey)
 	if err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
@@ -152,7 +157,7 @@ func handleShowTagValues(meta *MetaStore, query string) *InfluxDBResponse {
 }
 
 // handleShowFieldKeys returns field info for a measurement
-func handleShowFieldKeys(meta *MetaStore, query string) *InfluxDBResponse {
+func handleShowFieldKeys(meta *MetaStore, dbName, query string) *InfluxDBResponse {
 	upper := strings.ToUpper(query)
 	fromIdx := strings.Index(upper, "FROM")
 	if fromIdx < 0 {
@@ -161,7 +166,7 @@ func handleShowFieldKeys(meta *MetaStore, query string) *InfluxDBResponse {
 	afterFrom := strings.TrimSpace(query[fromIdx+4:])
 	measurement := extractFirstToken(afterFrom)
 
-	fields, err := meta.GetFields(measurement)
+	fields, err := meta.GetFields(dbName, measurement)
 	if err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
