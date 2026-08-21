@@ -1,9 +1,18 @@
 ---
-- name: "Install influx2tsdb-proxy"
-  gather_facts: true
-  hosts: "{{ HOSTS }}"
-  become: true
-  become_user: root
-  become_method: sudo
+- name: Deploy influx2tsdb-proxy
+  hosts: all
+  become: yes
   roles:
     - role: influx2tsdb-proxy
+  vars:
+    influx2tsdb_proxy_instances:
+      - name: game
+        pg_dsn: "postgres://user:pass@db1:5432/game_tsdb"
+        port: 8087
+        pool_size: 20
+        verbose: true
+      - name: monitor
+        pg_dsn: "postgres://user:pass@db2:5432/monitor_tsdb"
+        port: 8088
+        pool_size: 10
+        dir: /opt/influx2tsdb-proxy-monitor

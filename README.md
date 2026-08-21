@@ -128,6 +128,68 @@ make cross
 
 Binary output: `build/influx2tsdb-proxy`
 
+## Deployment (Ansible)
+
+Automated deployment via Ansible with supervisor process management.
+
+### Quick Setup
+
+```bash
+# Download ansible playbooks
+curl -sL https://raw.githubusercontent.com/mars-base/influx2tsdb-proxy/main/ansible/install.sh | bash
+cd /srv/influx2tsdb-proxy
+
+# Create inventory
+cat > hosts << 'EOF'
+[tsdb_servers]
+192.168.1.100
+EOF
+
+# Deploy (PostgreSQL DSN required)
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
+  -e "HOSTS=tsdb_servers" \
+  -e "influx2tsdb_proxy_pg_dsn=postgres://user:pass@host:5432/db?sslmode=disable"
+```
+
+### Configuration Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `influx2tsdb_proxy_pg_dsn` | *(required)* | PostgreSQL/TimescaleDB connection string |
+| `influx2tsdb_proxy_port` | `8087` | HTTP listen port |
+| `influx2tsdb_proxy_pool_size` | `10` | Connection pool size |
+| `influx2tsdb_proxy_verbose` | `false` | Enable SQL and query detail logging |
+| `influx2tsdb_proxy_version` | `latest` | Release version (e.g., `v1.0.0`) |
+| `influx2tsdb_proxy_dir` | `/srv/influx2tsdb-proxy` | Installation directory |
+
+### Specify Version
+
+```bash
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
+  -e "HOSTS=tsdb_servers" \
+  -e "influx2tsdb_proxy_version=v1.0.0" \
+  -e "influx2tsdb_proxy_pg_dsn=postgres://user:pass@host:5432/db"
+```
+
+### Management
+
+```bash
+# Check status
+ansible tsdb_servers -m shell -a "supervisorctl status influx2tsdb-proxy"
+
+# Restart service
+ansible tsdb_servers -m shell -a "supervisorctl restart influx2tsdb-proxy"
+
+# View logs
+ansible tsdb_servers -m shell -a "tail -50 /srv/influx2tsdb-proxy/logs/out_influx2tsdb-proxy.log"
+
+# Update binary only (skip supervisor setup)
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
+  -e "HOSTS=tsdb_servers" --tags "sync"
+```
+
+See [ansible/README.md](ansible/README.md) for detailed documentation.
+
 ## Testing
 
 See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the full comparison test guide.
