@@ -170,7 +170,17 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 		if err := c.retentionStore.AlterPolicy(name, duration); err != nil {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 		}
-		// Sync immediately to TimescaleDB
+	}
+
+	// Handle DEFAULT (optional for ALTER)
+	if strings.Contains(upperRest, "DEFAULT") {
+		if err := c.retentionStore.SetDefault(name); err != nil {
+			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+		}
+	}
+
+	// Sync to TimescaleDB if anything changed
+	if durIdx >= 0 || strings.Contains(upperRest, "DEFAULT") {
 		if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
 			log.Printf("Warning: retention sync after ALTER failed: %v", err)
 		}

@@ -225,6 +225,36 @@ func (rs *RetentionStore) AlterPolicy(name string, duration string) error {
 	return nil
 }
 
+// SetDefault marks the given policy as default and clears all others
+func (rs *RetentionStore) SetDefault(name string) error {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+
+	if _, ok := rs.policies[name]; !ok {
+		return fmt.Errorf("retention policy %q not found", name)
+	}
+
+	// Clear all defaults in DB
+	if _, err := rs.pool.Exec(rs.ctx,
+		"UPDATE _retention_policy SET is_default = FALSE WHERE is_default = TRUE"); err != nil {
+		return fmt.Errorf("clear defaults: %w", err)
+	}
+
+	// Set new default
+	if _, err := rs.pool.Exec(rs.ctx,
+		"UPDATE _retention_policy SET is_default = TRUE WHERE name = $1", name); err != nil {
+		return fmt.Errorf("set default: %w", err)
+	}
+
+	// Update cache
+	for _, rp := range rs.policies {
+		rp.IsDefault = rp.Name == name
+	}
+
+	log.Printf("Set default retention policy: %s", name)
+	return nil
+}
+
 // DropPolicy removes a retention policy
 func (rs *RetentionStore) DropPolicy(name string) error {
 	rs.mu.Lock()
