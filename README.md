@@ -130,7 +130,7 @@ Binary output: `build/influx2tsdb-proxy`
 
 ## Deployment (Ansible)
 
-Automated deployment via Ansible with supervisor process management.
+Automated deployment via Ansible with supervisor process management. Supports multiple instances on a single host.
 
 ### Quick Setup
 
@@ -145,47 +145,82 @@ cat > hosts << 'EOF'
 192.168.1.100
 EOF
 
-# Deploy (PostgreSQL DSN required)
-ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
-  -e "HOSTS=tsdb_servers" \
-  -e "influx2tsdb_proxy_pg_dsn=postgres://user:pass@host:5432/db?sslmode=disable"
+# Create instance config
+cat > group_vars/tsdb_servers.yml << 'EOF'
+influx2tsdb_proxy_instances:
+  - name: default
+    pg_dsn: "postgres://user:pass@host:5432/tsdb?sslmode=disable"
+    port: 8087
+EOF
+
+# Deploy
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml
 ```
 
-### Configuration Variables
+### Multi-Instance Deployment
+
+```yaml
+# group_vars/tsdb_servers.yml
+influx2tsdb_proxy_instances:
+  - name: game
+    pg_dsn: "postgres://user:pass@db1:5432/game_tsdb"
+    port: 8087
+    pool_size: 20
+    verbose: true
+  - name: monitor
+    pg_dsn: "postgres://user:pass@db2:5432/monitor_tsdb"
+    port: 8088
+    pool_size: 10
+    dir: /opt/influx2tsdb-proxy-monitor
+```
+
+Each instance has:
+- Independent directory: `/srv/influx2tsdb-proxy-<name>` (or custom `dir`)
+- Independent port and PostgreSQL DSN
+- Independent supervisor process: `influx2tsdb-proxy-<name>`
+- Independent log files: `<dir>/logs/out_<name>.log`
+
+### Instance Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `influx2tsdb_proxy_pg_dsn` | *(required)* | PostgreSQL/TimescaleDB connection string |
-| `influx2tsdb_proxy_port` | `8087` | HTTP listen port |
-| `influx2tsdb_proxy_pool_size` | `10` | Connection pool size |
-| `influx2tsdb_proxy_verbose` | `false` | Enable SQL and query detail logging |
+| `name` | *(required)* | Instance name (used in process name, directory, logs) |
+| `pg_dsn` | *(required)* | PostgreSQL/TimescaleDB connection string |
+| `port` | `8087` | HTTP listen port |
+| `pool_size` | `10` | Connection pool size |
+| `verbose` | `false` | Enable SQL and query detail logging |
+| `dir` | `/srv/influx2tsdb-proxy-<name>` | Installation directory |
+
+Global variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `influx2tsdb_proxy_version` | `latest` | Release version (e.g., `v1.0.0`) |
-| `influx2tsdb_proxy_dir` | `/srv/influx2tsdb-proxy` | Installation directory |
 
 ### Specify Version
 
 ```bash
 ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
-  -e "HOSTS=tsdb_servers" \
-  -e "influx2tsdb_proxy_version=v1.0.0" \
-  -e "influx2tsdb_proxy_pg_dsn=postgres://user:pass@host:5432/db"
+  -e "influx2tsdb_proxy_version=v1.0.0"
 ```
 
 ### Management
 
 ```bash
-# Check status
-ansible tsdb_servers -m shell -a "supervisorctl status influx2tsdb-proxy"
+# Check all instances
+ansible tsdb_servers -m shell -a "supervisorctl status"
 
-# Restart service
-ansible tsdb_servers -m shell -a "supervisorctl restart influx2tsdb-proxy"
+# Restart all instances
+ansible tsdb_servers -m shell -a "supervisorctl restart 'influx2tsdb-proxy:*'"
+
+# Restart specific instance
+ansible tsdb_servers -m shell -a "supervisorctl restart influx2tsdb-proxy-game"
 
 # View logs
-ansible tsdb_servers -m shell -a "tail -50 /srv/influx2tsdb-proxy/logs/out_influx2tsdb-proxy.log"
+ansible tsdb_servers -m shell -a "tail -50 /srv/influx2tsdb-proxy-game/logs/out_game.log"
 
 # Update binary only (skip supervisor setup)
-ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
-  -e "HOSTS=tsdb_servers" --tags "sync"
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml --tags "sync"
 ```
 
 See [ansible/README.md](ansible/README.md) for detailed documentation.
