@@ -2,25 +2,22 @@
 set -euo pipefail
 
 # influx2tsdb-proxy Ansible 部署安装脚本
-# 用法: curl -sL https://raw.githubusercontent.com/mars-base/influx2tsdb-proxy/main/ansible/install.sh | bash
+# 用法: 在已有 ansible 工程目录下执行
+#   curl -sL https://raw.githubusercontent.com/mars-base/influx2tsdb-proxy/main/ansible/install.sh | bash -s /path/to/ansible-project
+#
+# 将 playbook 和 role 原封不动拷贝到目标 ansible 工程中
 
 REPO="mars-base/influx2tsdb-proxy"
 BRANCH="main"
-INSTALL_DIR="${INSTALL_DIR:-/srv/influx2tsdb-proxy}"
+TARGET_DIR="${1:-.}"
 
 echo "==> 安装 influx2tsdb-proxy Ansible 部署配置"
-echo "    仓库: ${REPO}"
-echo "    分支: ${BRANCH}"
-echo "    目标: ${INSTALL_DIR}"
+echo "    目标目录: ${TARGET_DIR}"
 echo ""
 
-# 创建安装目录
-mkdir -p "${INSTALL_DIR}"
-
-# 下载 ansible 目录
+# 下载 ansible 目录中的 playbook 和 role 文件
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/ansible"
 FILES=(
-  "requirements.yml"
   "playbooks/influx2tsdb-proxy.yml"
   "roles/influx2tsdb-proxy/defaults/main.yml"
   "roles/influx2tsdb-proxy/handlers/main.yml"
@@ -31,9 +28,9 @@ FILES=(
 )
 
 for file in "${FILES[@]}"; do
-  target="${INSTALL_DIR}/${file}"
+  target="${TARGET_DIR}/${file}"
   mkdir -p "$(dirname "${target}")"
-  echo "  下载: ${file}"
+  echo "  安装: ${file}"
   curl -sL "${BASE_URL}/${file}" -o "${target}"
 done
 
@@ -41,20 +38,8 @@ echo ""
 echo "✓ 安装完成！"
 echo ""
 echo "使用方法："
-echo "  cd ${INSTALL_DIR}"
+echo "  cd ${TARGET_DIR}"
 echo ""
-echo "  # 1. 编辑 host 文件（添加目标服务器）"
-echo "  cat > hosts << 'EOF'"
-echo "[servers]"
-echo "192.168.1.100"
-echo "EOF"
-echo ""
-echo "  # 2. 创建变量文件（设置 PostgreSQL DSN）"
-echo "  cat > group_vars/servers.yml << 'EOF'"
-echo "influx2tsdb_proxy_pg_dsn: \"postgres://user:pass@host:5432/db?sslmode=disable\""
-echo "influx2tsdb_proxy_port: 8087"
-echo "EOF"
-echo ""
-echo "  # 3. 执行 playbook"
-echo "  ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml -e \"HOSTS=servers\""
+echo "  # 执行 playbook（需提供实例配置）"
+echo "  ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml"
 echo ""
