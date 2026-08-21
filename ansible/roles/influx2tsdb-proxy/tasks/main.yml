@@ -1,0 +1,54 @@
+---
+- name: Check if supervisorctl is available
+  ansible.builtin.shell: which supervisorctl
+  register: supervisor_check
+  failed_when: false
+  changed_when: false
+  tags: [supervisor]
+
+- name: Install supervisor
+  ansible.builtin.apt:
+    name: supervisor
+    state: present
+    update_cache: yes
+  when: supervisor_check.rc != 0
+  tags: [supervisor]
+
+- name: Enable supervisor service
+  ansible.builtin.systemd:
+    name: supervisor
+    enabled: yes
+    state: started
+  tags: [supervisor]
+
+- name: Create instance directories
+  ansible.builtin.file:
+    path: "{{ item.dir | default('/srv/influx2tsdb-proxy-' + item.name) }}/logs"
+    state: directory
+    mode: '0755'
+  loop: "{{ influx2tsdb_proxy_instances }}"
+  tags: [dir]
+
+- name: Download influx2tsdb-proxy binary
+  ansible.builtin.get_url:
+    url: "{{ influx2tsdb_proxy_binary_url }}"
+    dest: /usr/local/bin/influx2tsdb-proxy
+    mode: '0755'
+    force: yes
+  tags: [sync, update]
+
+- name: Deploy supervisor configuration for each instance
+  ansible.builtin.template:
+    src: supervisor/influx2tsdb-proxy.conf.j2
+    dest: /etc/supervisor/conf.d/influx2tsdb-proxy-{{ item.name }}.conf
+    mode: '0644'
+  loop: "{{ influx2tsdb_proxy_instances }}"
+  tags: [start, update, conf]
+  notify: restart all influx2tsdb-proxy instances
+
+- name: Reload supervisor and restart instances
+  ansible.builtin.shell: >
+    supervisorctl reread &&
+    supervisorctl update
+  changed_when: false
+  tags: [start, update, conf]

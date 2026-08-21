@@ -1,0 +1,23 @@
+---
+# influx2tsdb-proxy 默认配置（支持单机多实例）
+
+influx2tsdb_proxy_version: latest
+
+# 下载 URL（从 GitHub Releases 获取）
+influx2tsdb_proxy_binary_url: "https://github.com/mars-base/influx2tsdb-proxy/releases/{{ influx2tsdb_proxy_version }}/download/influx2tsdb-proxy-linux-amd64"
+
+# 实例列表（每个实例独立目录、端口、DSN、supervisor 进程）
+# 必须在 host_vars / group_vars 中覆盖
+influx2tsdb_proxy_instances:
+  - name: default              # 实例名（用于目录名、supervisor 进程名）
+    pg_dsn: ""                 # PostgreSQL/TimescaleDB 连接字符串（必需）
+    port: 8087                 # HTTP 监听端口
+    pool_size: 10              # 连接池大小
+    verbose: false             # 启用 SQL 和查询详细日志
+    dir: /srv/influx2tsdb-proxy  # 安装目录（可选，默认自动计算）
+    # supervisor 配置（可选，以下有默认值）
+    supervisor_autorestart: true
+    supervisor_autostart: true
+    supervisor_user: root
+    supervisor_startsecs: 3
+    supervisor_startretries: 3

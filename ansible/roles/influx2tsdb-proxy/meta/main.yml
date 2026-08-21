@@ -1,0 +1,25 @@
+---
+galaxy_info:
+  role_name: influx2tsdb-proxy
+  author: mars-base
+  description: Deploy influx2tsdb-proxy - InfluxDB 1.x protocol adapter for TimescaleDB
+  license: MIT
+  min_ansible_version: "2.9"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+  galaxy_tags:
+    - influxdb
+    - timescaledb
+    - postgresql
+    - proxy
+    - monitoring
+    - grafana
+dependencies: []

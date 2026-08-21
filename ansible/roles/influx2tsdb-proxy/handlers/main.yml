@@ -1,0 +1,7 @@
+---
+- name: Restart all influx2tsdb-proxy instances
+  ansible.builtin.shell: >
+    supervisorctl reread &&
+    supervisorctl update &&
+    supervisorctl restart 'influx2tsdb-proxy:*'
+  listen: "restart all influx2tsdb-proxy instances"
