@@ -297,7 +297,7 @@
     },
     "timezone": "browser",
     "title": "游戏服务器在线统计 (InfluxDB Proxy)",
-    "uid": "influx-proxy-original"
+    "uid": "influx2tsdb-proxy"
   },
   "overwrite": true
 }
