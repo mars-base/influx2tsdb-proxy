@@ -135,9 +135,9 @@
               "fillOpacity": 10,
               "lineInterpolation": "smooth",
               "lineWidth": 2,
-              "showPoints": "never"
+              "showPoints": "auto"
             },
-            "unit": "short"
+            "unit": "none"
           }
         },
         "gridPos": {
@@ -147,6 +147,16 @@
           "y": 4
         },
         "id": 5,
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max", "min"]
+          },
+          "tooltip": {
+            "mode": "single"
+          }
+        },
         "targets": [
           {
             "alias": "总在线",
@@ -172,7 +182,7 @@
               "lineWidth": 1,
               "showPoints": "never"
             },
-            "unit": "short"
+            "unit": "none"
           }
         },
         "gridPos": {
