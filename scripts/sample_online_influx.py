@@ -9,6 +9,12 @@ Single target:
 
   # Write to influx2tsdb-proxy (8087)
   INFLUX_PORT=8087 INFLUX_DB=tsdb python3 sample_online_influx.py
+  # Note: INFLUX_DB must point to a database with PostgreSQL + TimescaleDB
+  # extension already set up. The proxy will auto-create hypertable on first
+  # write, but the database and extension must exist beforehand:
+  #   CREATE DATABASE tsdb;
+  #   \c tsdb
+  #   CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 Dual target (both InfluxDB + proxy simultaneously):
   # Option 1: run two background processes
