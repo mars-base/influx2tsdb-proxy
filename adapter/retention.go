@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,17 +75,35 @@ func (rs *RetentionStore) initialize() error {
 		log.Println("Migrated _retention_policy: measurement -> name")
 	}
 
-	// Insert default autogen policy if not present (matches InfluxDB behavior)
+	// Ensure exactly one default policy exists.
+	// Count current defaults; if none, set autogen as default.
+	var defaultCount int
+	rs.pool.QueryRow(rs.ctx, "SELECT COUNT(*) FROM _retention_policy WHERE is_default = TRUE").Scan(&defaultCount)
+
 	var hasAutogen bool
 	rs.pool.QueryRow(rs.ctx, "SELECT EXISTS(SELECT 1 FROM _retention_policy WHERE name = 'autogen')").Scan(&hasAutogen)
 	if !hasAutogen {
 		_, err := rs.pool.Exec(rs.ctx,
 			`INSERT INTO _retention_policy (name, duration, duration_ns, is_default)
-			VALUES ('autogen', '0s', 0, true)`)
+			VALUES ('autogen', '0s', 0, $1)
+			ON CONFLICT (name) DO UPDATE SET is_default = EXCLUDED.is_default`, defaultCount == 0)
 		if err != nil {
 			return fmt.Errorf("insert autogen policy: %w", err)
 		}
-		log.Println("Created default autogen retention policy")
+		log.Printf("Created autogen retention policy (default=%v)", defaultCount == 0)
+	} else if defaultCount == 0 {
+		// No default at all — restore autogen as default
+		if _, err := rs.pool.Exec(rs.ctx, "UPDATE _retention_policy SET is_default = TRUE WHERE name = 'autogen'"); err != nil {
+			return fmt.Errorf("restore autogen as default: %w", err)
+		}
+		log.Println("Restored autogen as default (no default found)")
+	} else if defaultCount > 1 {
+		// Multiple defaults (crash recovery) — keep only the first one
+		if _, err := rs.pool.Exec(rs.ctx, `UPDATE _retention_policy SET is_default = FALSE
+			WHERE name NOT IN (SELECT name FROM _retention_policy WHERE is_default = TRUE ORDER BY name LIMIT 1)`); err != nil {
+			return fmt.Errorf("fix multiple defaults: %w", err)
+		}
+		log.Printf("Fixed multiple defaults (kept first)")
 	}
 
 	log.Println("Initialized _retention_policy table")
@@ -165,13 +184,19 @@ func (rs *RetentionStore) CreatePolicy(name string, duration string, isDefault b
 		return fmt.Errorf("upsert policy: %w", err)
 	}
 
-	// Update cache
-	rs.policies[name] = &RetentionPolicy{
-		Name:       name,
-		Duration:   duration,
-		DurationNs: durationNs,
-		IsDefault:  isDefault,
-		CreatedAt:  time.Now(),
+	// Update cache (preserve CreatedAt if policy already exists)
+	if existing, ok := rs.policies[name]; ok {
+		existing.Duration = duration
+		existing.DurationNs = durationNs
+		existing.IsDefault = isDefault
+	} else {
+		rs.policies[name] = &RetentionPolicy{
+			Name:       name,
+			Duration:   duration,
+			DurationNs: durationNs,
+			IsDefault:  isDefault,
+			CreatedAt:  time.Now(),
+		}
 	}
 
 	// Reload all policies from DB to sync is_default changes
@@ -261,8 +286,14 @@ func (rs *RetentionStore) DropPolicy(name string) error {
 	defer rs.mu.Unlock()
 
 	// Check if exists
-	if _, ok := rs.policies[name]; !ok {
+	policy, ok := rs.policies[name]
+	if !ok {
 		return fmt.Errorf("retention policy %q not found", name)
+	}
+
+	// InfluxDB does not allow dropping the default retention policy
+	if policy.IsDefault {
+		return fmt.Errorf("cannot drop default retention policy %q; use ALTER to set another policy as DEFAULT first", name)
 	}
 
 	// Delete from table
@@ -278,14 +309,20 @@ func (rs *RetentionStore) DropPolicy(name string) error {
 	return nil
 }
 
-// ShowPolicies returns all retention policies
+// ShowPolicies returns all retention policies sorted by name
 func (rs *RetentionStore) ShowPolicies() []RetentionPolicy {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
+	names := make([]string, 0, len(rs.policies))
+	for name := range rs.policies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	result := make([]RetentionPolicy, 0, len(rs.policies))
-	for _, rp := range rs.policies {
-		result = append(result, *rp)
+	for _, name := range names {
+		result = append(result, *rs.policies[name])
 	}
 	return result
 }

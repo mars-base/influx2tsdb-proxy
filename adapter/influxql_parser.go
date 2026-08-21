@@ -127,8 +127,13 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION value"}}}
 	}
 
-	// Check DEFAULT
-	isDefault := strings.Contains(upperRest, "DEFAULT")
+	// Check DEFAULT — only search after REPLICATION to avoid matching policy name
+	replIdx := strings.LastIndex(upperRest, "REPLICATION")
+	afterRepl := ""
+	if replIdx >= 0 {
+		afterRepl = upperRest[replIdx+11:]
+	}
+	isDefault := strings.Contains(afterRepl, "DEFAULT")
 
 	if err := c.retentionStore.CreatePolicy(name, duration, isDefault); err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
@@ -173,14 +178,23 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 	}
 
 	// Handle DEFAULT (optional for ALTER)
-	if strings.Contains(upperRest, "DEFAULT") {
+	// Search only after DURATION or REPLICATION to avoid matching policy name
+	alterTail := upperRest
+	if durIdx >= 0 {
+		alterTail = upperRest[durIdx+8:]
+	} else if replIdx := strings.LastIndex(upperRest, "REPLICATION"); replIdx >= 0 {
+		alterTail = upperRest[replIdx+11:]
+	}
+	hasAlterDefault := strings.Contains(alterTail, "DEFAULT")
+
+	if hasAlterDefault {
 		if err := c.retentionStore.SetDefault(name); err != nil {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 		}
 	}
 
 	// Sync to TimescaleDB if anything changed
-	if durIdx >= 0 || strings.Contains(upperRest, "DEFAULT") {
+	if durIdx >= 0 || hasAlterDefault {
 		if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
 			log.Printf("Warning: retention sync after ALTER failed: %v", err)
 		}
