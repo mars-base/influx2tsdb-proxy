@@ -42,7 +42,7 @@ jobs:
           if [ "${GOOS}" = "windows" ]; then
             EXT=".exe"
           fi
-          BINARY="influx2tsdb-proxy-${GOOS}-${GOarch}${EXT}"
+          BINARY="influx2tsdb-proxy-${GOOS}-${GOARCH}${EXT}"
           go build -ldflags "${LDFLAGS}" -o "build/${BINARY}" .
 
       - name: Upload artifact
