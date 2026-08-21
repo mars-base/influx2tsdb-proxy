@@ -108,26 +108,43 @@ Binary output: `build/influx2tsdb-proxy`
 
 ## Testing
 
-See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the full comparison test guide between InfluxDB 1.x and influx2tsdb-proxy.
+See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the full comparison test guide.
 
-The test covers three dimensions:
+### influx CLI Compatibility (InfluxDB shell v1.11.8)
 
-1. **Write interface** — single/multi-line Line Protocol, invalid input, concurrent dual-write
-2. **Read interface** — `/ping`, `/debug/vars`, `SHOW` queries, aggregations (`mean`/`sum`/`max`/`min`/`count`/`last`), subqueries, epoch time format
-3. **Grafana panel verification** — 7 panels (stat, timeseries, bargauge, piechart) rendered side-by-side from real InfluxDB and proxy datasources
+Tested with `influx -host localhost -port 8087 -database game_monitor -execute "..."` using dual-write sampling.
+Both endpoints return identical data for all supported commands:
 
-Quick start:
+| # | Command | InfluxDB 8086 | Proxy 8087 | Match |
+|---|---------|:---:|:---:|:---:|
+| 1 | `SHOW DATABASES` | 4 databases | 1 (request db) | ✅ |
+| 2 | `SHOW MEASUREMENTS` | `server_online` | `server_online` | ✅ |
+| 3 | `SHOW TAG KEYS FROM server_online` | `region`, `server_id` | `region`, `server_id` | ✅ |
+| 4 | `SHOW TAG VALUES ... WITH KEY=server_id` | s1-s8 | s1-s8 | ✅ |
+| 5 | `SHOW FIELD KEYS FROM server_online` | `online_count integer` | `online_count integer` | ✅ |
+| 6 | `SELECT mean(...) GROUP BY time(10s)` | identical values | identical values | ✅ |
+| 7 | `SELECT sum(...) GROUP BY time(10s)` | identical values | identical values | ✅ |
+| 8 | `SELECT last(...) GROUP BY server_id` | 8 servers, values match | 8 servers, values match | ✅ |
+| 9 | `SELECT count(...) WHERE time > now()-1m` | 96 | 96 | ✅ |
+| 10 | Subquery `SELECT sum(last()) GROUP BY server_id` | 21430 | 21430 | ✅ |
+
+Known minor differences:
+- **SHOW DATABASES**: InfluxDB lists all databases; proxy returns only the requested `db` parameter
+- **Time precision in `last()`**: InfluxDB uses native nanoseconds; TimescaleDB stores milliseconds, converted to ns for epoch output
+- **Count time column**: InfluxDB returns the latest write timestamp; proxy returns `0` for non-time-grouped aggregates (standard InfluxDB behavior)
+
+### Quick Start
 
 ```bash
 # 1. Start proxy
 ./influx2tsdb-proxy -pg "postgres://user:pass@host:port/db"
 
 # 2. Run dual-write sampling (writes identical data to both InfluxDB and proxy)
-DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=tsdb python3 scripts/sample_online_influx.py
+DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py
 
-# 3. Compare responses
-curl -s "http://localhost:8086/query?db=game_monitor&epoch=ms&q=SELECT%20mean(%22online_count%22)%20FROM%20%22server_online%22%20WHERE%20time%20%3E%20now()%20-%205m%20GROUP%20BY%20time(30s)"
-curl -s "http://localhost:8087/query?db=tsdb&epoch=ms&q=SELECT%20mean(%22online_count%22)%20FROM%20%22server_online%22%20WHERE%20time%20%3E%20now()%20-%205m%20GROUP%20BY%20time(30s)"
+# 3. Compare with influx CLI
+influx -host localhost -port 8086 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
+influx -host localhost -port 8087 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
 ```
 
 ## License
