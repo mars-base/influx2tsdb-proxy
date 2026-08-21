@@ -153,7 +153,7 @@ influx2tsdb_proxy_instances:
 EOF
 
 # Deploy
-ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml -e "HOSTS=tsdb_servers"
 ```
 
 ### Multi-Instance Deployment

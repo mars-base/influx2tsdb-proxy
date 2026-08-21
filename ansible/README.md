@@ -73,7 +73,7 @@ influx2tsdb_proxy_version: "v1.0.0"  # 默认 latest
 ### 3. 执行 playbook
 
 ```bash
-ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml -e "HOSTS=servers"
 ```
 
 ## 实例变量说明
