@@ -14,15 +14,16 @@ var Verbose bool
 
 // Converter translates InfluxQL queries to SQL and executes them against TimescaleDB
 type Converter struct {
-	meta   *MetaStore
-	dbName string
-	fromMs int64
-	toMs   int64
-	epoch  string // "ms" for millisecond timestamps, empty for RFC3339
+	meta           *MetaStore
+	retentionStore *RetentionStore
+	dbName         string
+	fromMs         int64
+	toMs           int64
+	epoch          string // "ms" for millisecond timestamps, empty for RFC3339
 }
 
-func NewConverter(meta *MetaStore, dbName string, fromMs, toMs int64, epoch string) *Converter {
-	return &Converter{meta: meta, dbName: dbName, fromMs: fromMs, toMs: toMs, epoch: epoch}
+func NewConverter(meta *MetaStore, retentionStore *RetentionStore, dbName string, fromMs, toMs int64, epoch string) *Converter {
+	return &Converter{meta: meta, retentionStore: retentionStore, dbName: dbName, fromMs: fromMs, toMs: toMs, epoch: epoch}
 }
 
 // Convert parses an InfluxQL query and returns an InfluxDB-compatible response
@@ -37,13 +38,19 @@ func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 	case strings.HasPrefix(upper, "SHOW MEASUREMENTS"):
 		return handleShowMeasurements(c.meta), nil
 	case strings.HasPrefix(upper, "SHOW RETENTION"):
-		return handleShowRetentionPolicies(), nil
+		return c.handleShowRetentionPolicies(), nil
 	case strings.HasPrefix(upper, "SHOW TAG VALUES"):
 		return handleShowTagValues(c.meta, query), nil
 	case strings.HasPrefix(upper, "SHOW TAG KEYS"):
 		return handleShowTagKeys(c.meta, query), nil
 	case strings.HasPrefix(upper, "SHOW FIELD KEYS"):
 		return handleShowFieldKeys(c.meta, query), nil
+	case strings.HasPrefix(upper, "CREATE RETENTION POLICY"):
+		return c.handleCreateRetentionPolicy(query), nil
+	case strings.HasPrefix(upper, "ALTER RETENTION POLICY"):
+		return c.handleAlterRetentionPolicy(query), nil
+	case strings.HasPrefix(upper, "DROP RETENTION POLICY"):
+		return c.handleDropRetentionPolicy(query), nil
 	case strings.HasPrefix(upper, "DROP MEASUREMENT"):
 		return c.handleDropMeasurement(query)
 	case strings.HasPrefix(upper, "CREATE DATABASE"):
@@ -59,15 +66,145 @@ func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 	}
 }
 
-func handleShowRetentionPolicies() *InfluxDBResponse {
+// handleShowRetentionPolicies returns retention policies from _retention_policy table
+func (c *Converter) handleShowRetentionPolicies() *InfluxDBResponse {
+	if c.retentionStore == nil {
+		return &InfluxDBResponse{
+			Results: []InfluxDBResult{{
+				Series: []InfluxDBSeries{{
+					Columns: []string{"name", "duration", "shardGroupDuration", "replicaN", "default"},
+					Values:  [][]interface{}{{"autogen", "0s", "168h0m0s", 1, true}},
+				}},
+			}},
+		}
+	}
+
+	policies := c.retentionStore.ShowPolicies()
+	if len(policies) == 0 {
+		// Return default autogen policy
+		return &InfluxDBResponse{
+			Results: []InfluxDBResult{{
+				Series: []InfluxDBSeries{{
+					Columns: []string{"name", "duration", "shardGroupDuration", "replicaN", "default"},
+					Values:  [][]interface{}{{"autogen", "0s", "168h0m0s", 1, true}},
+				}},
+			}},
+		}
+	}
+
+	values := make([][]interface{}, len(policies))
+	for i, rp := range policies {
+		values[i] = []interface{}{rp.Name, rp.Duration, "168h0m0s", 1, rp.IsDefault}
+	}
+
 	return &InfluxDBResponse{
 		Results: []InfluxDBResult{{
 			Series: []InfluxDBSeries{{
 				Columns: []string{"name", "duration", "shardGroupDuration", "replicaN", "default"},
-				Values:  [][]interface{}{{"autogen", "0s", "168h0m0s", 1, true}},
+				Values:  values,
 			}},
 		}},
 	}
+}
+
+// handleCreateRetentionPolicy handles CREATE RETENTION POLICY
+// Syntax: CREATE RETENTION POLICY "name" ON "db" DURATION 7d REPLICATION 1 DEFAULT
+func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse {
+	if c.retentionStore == nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "retention store not initialized"}}}
+	}
+
+	upper := strings.ToUpper(query)
+	rest := query[len("CREATE RETENTION POLICY"):]
+	upperRest := upper[len("CREATE RETENTION POLICY"):]
+
+	// Extract policy name (first token, may be quoted)
+	name := extractFirstToken(strings.TrimSpace(rest))
+	if name == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing retention policy name"}}}
+	}
+
+	// Extract DURATION
+	durIdx := strings.Index(upperRest, "DURATION")
+	if durIdx < 0 {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION clause"}}}
+	}
+	afterDur := strings.TrimSpace(rest[durIdx+8:])
+	duration := extractFirstToken(afterDur)
+	if duration == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION value"}}}
+	}
+
+	// Check DEFAULT
+	isDefault := strings.Contains(upperRest, "DEFAULT")
+
+	if err := c.retentionStore.CreatePolicy(name, duration, isDefault); err != nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+	}
+
+	// Sync immediately to TimescaleDB
+	if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
+		log.Printf("Warning: retention sync after CREATE failed: %v", err)
+	}
+
+	return emptyResult()
+}
+
+// handleAlterRetentionPolicy handles ALTER RETENTION POLICY
+// Syntax: ALTER RETENTION POLICY "name" ON "db" DURATION 30d DEFAULT
+func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
+	if c.retentionStore == nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "retention store not initialized"}}}
+	}
+
+	upper := strings.ToUpper(query)
+	rest := query[len("ALTER RETENTION POLICY"):]
+	upperRest := upper[len("ALTER RETENTION POLICY"):]
+
+	// Extract policy name
+	name := extractFirstToken(strings.TrimSpace(rest))
+	if name == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing retention policy name"}}}
+	}
+
+	// Extract DURATION (optional for ALTER)
+	durIdx := strings.Index(upperRest, "DURATION")
+	if durIdx >= 0 {
+		afterDur := strings.TrimSpace(rest[durIdx+8:])
+		duration := extractFirstToken(afterDur)
+		if duration == "" {
+			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION value"}}}
+		}
+		if err := c.retentionStore.AlterPolicy(name, duration); err != nil {
+			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+		}
+		// Sync immediately to TimescaleDB
+		if err := c.retentionStore.SyncToTimescaleDB(); err != nil {
+			log.Printf("Warning: retention sync after ALTER failed: %v", err)
+		}
+	}
+
+	return emptyResult()
+}
+
+// handleDropRetentionPolicy handles DROP RETENTION POLICY
+// Syntax: DROP RETENTION POLICY "name" ON "db"
+func (c *Converter) handleDropRetentionPolicy(query string) *InfluxDBResponse {
+	if c.retentionStore == nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "retention store not initialized"}}}
+	}
+
+	rest := query[len("DROP RETENTION POLICY"):]
+	name := extractFirstToken(strings.TrimSpace(rest))
+	if name == "" {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing retention policy name"}}}
+	}
+
+	if err := c.retentionStore.DropPolicy(name); err != nil {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+	}
+
+	return emptyResult()
 }
 
 func handleShowTagKeys(meta *MetaStore, query string) *InfluxDBResponse {

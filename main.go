@@ -95,6 +95,18 @@ func main() {
 		log.Fatalf("Failed to initialize metadata: %v", err)
 	}
 
+	// Initialize retention policy store
+	retentionStore, err := adapter.NewRetentionStore(ctx, pool)
+	if err != nil {
+		log.Fatalf("Failed to initialize retention store: %v", err)
+	}
+	// Initial sync of retention policies to TimescaleDB
+	if err := retentionStore.SyncToTimescaleDB(); err != nil {
+		log.Printf("Warning: initial retention sync failed: %v", err)
+	}
+	// Start background retention sync (every 5 minutes)
+	go retentionStore.RunSyncLoop(5)
+
 	// Set verbose logging
 	adapter.Verbose = *verbose
 
@@ -102,7 +114,7 @@ func main() {
 	http.HandleFunc("/ping", adapter.HandlePing)
 	http.HandleFunc("/debug/vars", adapter.HandleDebugVars)
 	http.HandleFunc("/write", adapter.HandleWrite(meta))
-	http.HandleFunc("/query", adapter.HandleQuery(dbName, meta))
+	http.HandleFunc("/query", adapter.HandleQuery(dbName, meta, retentionStore))
 
 	// Graceful shutdown
 	go func() {

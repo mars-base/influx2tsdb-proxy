@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func HandleQuery(dbName string, meta *MetaStore) http.HandlerFunc {
+func HandleQuery(dbName string, meta *MetaStore, retentionStore *RetentionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		queryStr := r.FormValue("q")
@@ -53,7 +53,7 @@ func HandleQuery(dbName string, meta *MetaStore) http.HandlerFunc {
 			log.Printf("[QUERY] q=%s epoch=%s from=%d to=%d", queryStr, epoch, fromMs, toMs)
 		}
 
-		conv := NewConverter(meta, effectiveDB, fromMs, toMs, epoch)
+		conv := NewConverter(meta, retentionStore, effectiveDB, fromMs, toMs, epoch)
 		result, err := conv.Convert(queryStr)
 		if err != nil {
 			log.Printf("[QUERY ERROR] %v", err)
