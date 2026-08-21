@@ -11,30 +11,30 @@
     url: "{{ influx2tsdb_proxy_binary_url }}"
     dest: /usr/local/bin/influx2tsdb-proxy
     mode: '0755'
+    force: yes
   tags: [install, update]
 
 - name: Create instance directories
   ansible.builtin.file:
-    path: "{{ item.dir | default('/opt/influx2tsdb-proxy-' + item.name) }}"
+    path: "{{ item.dir | default('/srv/influx2tsdb-proxy-' + item.name) }}/logs"
     state: directory
-    owner: "{{ item.supervisor_user | default(influx2tsdb_proxy_supervisor_user) }}"
     mode: '0755'
   loop: "{{ influx2tsdb_proxy_instances }}"
   tags: [install]
 
 - name: Deploy supervisor configuration for each instance
   ansible.builtin.template:
-    src: influx2tsdb-proxy.conf.j2
+    src: supervisor/influx2tsdb-proxy.conf.j2
     dest: /etc/supervisor/conf.d/influx2tsdb-proxy-{{ item.name }}.conf
     mode: '0644'
   loop: "{{ influx2tsdb_proxy_instances }}"
   tags: [config, update]
   notify: restart influx2tsdb-proxy instances
 
-- name: Reload supervisor and ensure instances are started
+- name: Reload supervisor and ensure all instances are running
   ansible.builtin.shell: >
     supervisorctl reread &&
     supervisorctl update &&
-    supervisorctl restart influx2tsdb-proxy:* || supervisorctl start influx2tsdb-proxy:*
+    supervisorctl status
   changed_when: false
   tags: [config, update]
