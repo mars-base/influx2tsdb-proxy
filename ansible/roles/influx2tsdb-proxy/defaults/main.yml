@@ -31,6 +31,7 @@ influx2tsdb_proxy_supervisor_startretries: 3
 influx2tsdb_proxy_instances:
   - name: default
     pg_dsn: "postgres://user:pass@localhost:5432/tsdb?sslmode=disable"
+    # influx_db: game_monitor                 # 可选，InfluxDB 对外数据库名，不设置则使用 name
     # dir: /opt/influx2tsdb-proxy-default  # 可选，不设置则自动计算
     # port: 8086                            # 可选，不设置则自动计算
     # pool_size: 20                         # 可选，覆盖默认值

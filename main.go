@@ -22,6 +22,7 @@ var version = "dev"
 func main() {
 	pgConn := flag.String("pg", "", "PostgreSQL connection string (e.g. postgres://user:pass@host:port/db?sslmode=disable)")
 	port := flag.String("port", "8087", "HTTP listen port")
+	dbName := flag.String("db", "", "InfluxDB database name to expose (optional, defaults to PostgreSQL database name)")
 	poolSize := flag.Int("pool", 10, "Connection pool size")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging (SQL statements and query details)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
@@ -37,8 +38,12 @@ func main() {
 		log.Fatal("Required flag: -pg <connection-string>\n  Example: -pg postgres://user:pass@host:port/db?sslmode=disable")
 	}
 
-	dbName := parseDBName(dsn)
-	if dbName == "" {
+	// Use specified db name or extract from PostgreSQL connection string
+	influxDBName := *dbName
+	if influxDBName == "" {
+		influxDBName = parseDBName(dsn)
+	}
+	if influxDBName == "" {
 		log.Fatalf("Cannot parse database name from connection string")
 	}
 
@@ -59,7 +64,7 @@ func main() {
 	if err := pool.Ping(ctx); err != nil {
 		log.Fatalf("Failed to connect to database: %v\n  DSN: %s\n  Please check:\n    - Connection string format\n    - Host/port accessibility\n    - Database name exists\n    - User/password correct", err, dsn)
 	}
-	log.Printf("Connected to database '%s' successfully", dbName)
+	log.Printf("Connected to PostgreSQL database, exposing as InfluxDB '%s'", influxDBName)
 
 	// Check PostgreSQL version and required extensions
 	var pgVersion string
@@ -124,7 +129,7 @@ func main() {
 	http.HandleFunc("/ping", adapter.HandlePing)
 	http.HandleFunc("/debug/vars", adapter.HandleDebugVars)
 	http.HandleFunc("/write", adapter.HandleWrite(meta))
-	http.HandleFunc("/query", adapter.HandleQuery(dbName, meta, retentionStore))
+	http.HandleFunc("/query", adapter.HandleQuery(influxDBName, meta, retentionStore))
 
 	// Graceful shutdown
 	go func() {
