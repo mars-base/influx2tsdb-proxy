@@ -49,7 +49,9 @@ func HandleQuery(dbName string, meta *MetaStore) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[QUERY] q=%s epoch=%s from=%d to=%d", queryStr, epoch, fromMs, toMs)
+		if Verbose {
+			log.Printf("[QUERY] q=%s epoch=%s from=%d to=%d", queryStr, epoch, fromMs, toMs)
+		}
 
 		conv := NewConverter(meta, effectiveDB, fromMs, toMs, epoch)
 		result, err := conv.Convert(queryStr)

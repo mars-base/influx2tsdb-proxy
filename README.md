@@ -43,7 +43,8 @@ influx2tsdb-proxy -pg "postgres://user:pass@host:port/db?sslmode=disable"
 influx2tsdb-proxy \
   -pg "postgres://user:pass@host:port/db?sslmode=disable" \
   -port 8087 \
-  -pool 10
+  -pool 10 \
+  -verbose
 ```
 
 | Flag | Default | Description |
@@ -51,6 +52,7 @@ influx2tsdb-proxy \
 | `-pg` | *(required)* | PostgreSQL connection string |
 | `-port` | `8087` | HTTP listen port |
 | `-pool` | `10` | Connection pool size |
+| `-verbose` | `false` | Enable SQL and query detail logging |
 
 ### Development
 

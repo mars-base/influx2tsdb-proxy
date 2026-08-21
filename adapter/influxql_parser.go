@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// Verbose controls whether SQL and query detail logs are printed.
+// Set via -verbose CLI flag.
+var Verbose bool
+
 // Converter translates InfluxQL queries to SQL and executes them against TimescaleDB
 type Converter struct {
 	meta   *MetaStore
@@ -167,7 +171,9 @@ func (c *Converter) handleSimpleSelect(query string) (*InfluxDBResponse, error) 
 		sql = c.buildSimpleSQL(q)
 	}
 
-	log.Printf("[SQL] %s", sql)
+	if Verbose {
+		log.Printf("[SQL] %s", sql)
+	}
 
 	return c.executeAndFormat(sql, q.measurement, q.groupByTags, q.fieldAliases)
 }
@@ -189,7 +195,9 @@ func (c *Converter) handleSubquery(query string) (*InfluxDBResponse, error) {
 	outerQ := c.parseSelectQuery(outer)
 	outerSQL := c.buildOuterSQL(outerQ, innerSQL, innerQ)
 
-	log.Printf("[SQL] %s", outerSQL)
+	if Verbose {
+		log.Printf("[SQL] %s", outerSQL)
+	}
 
 	// Use inner measurement name (outer query uses alias "t" which is not the real measurement)
 	measurement := innerQ.measurement
