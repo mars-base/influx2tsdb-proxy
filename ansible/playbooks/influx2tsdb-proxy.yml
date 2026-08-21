@@ -1,6 +1,6 @@
 ---
 - name: Deploy influx2tsdb-proxy
-  hosts: all
+  hosts: "{{ HOSTS }}"
   become: yes
   roles:
     - role: influx2tsdb-proxy
