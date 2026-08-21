@@ -137,15 +137,14 @@ Automated deployment via Ansible with supervisor process management. Supports mu
 ```bash
 # Download ansible playbooks
 curl -sL https://raw.githubusercontent.com/mars-base/influx2tsdb-proxy/main/ansible/install.sh | bash
-cd /srv/influx2tsdb-proxy
 
-# Create inventory
+# Create inventory or use existing hosts
 cat > hosts << 'EOF'
 [tsdb_servers]
 192.168.1.100
 EOF
 
-# Create instance config
+# Create instance config or use existing
 cat > group_vars/tsdb_servers.yml << 'EOF'
 influx2tsdb_proxy_instances:
   - name: default
@@ -197,13 +196,6 @@ Global variables:
 |----------|---------|-------------|
 | `influx2tsdb_proxy_version` | `latest` | Release version (e.g., `v1.0.0`) |
 
-### Specify Version
-
-```bash
-ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml \
-  -e "influx2tsdb_proxy_version=v1.0.0"
-```
-
 ### Management
 
 ```bash
@@ -229,13 +221,7 @@ See [ansible/README.md](ansible/README.md) for detailed documentation.
 
 See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the full comparison test guide.
 
-### Quick Start
-
-```bash
-./influx2tsdb-proxy -pg "postgres://user:pass@host:port/db"
-```
-
-### influx CLI Compatibility (InfluxDB shell v1.11.8)
+## influx CLI Compatibility (InfluxDB shell v1.11.8)
 
 Tested with dual-write sampling: `DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py`
 
