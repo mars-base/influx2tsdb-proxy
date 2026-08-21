@@ -14,8 +14,17 @@ func HandleQuery(dbName string, meta *MetaStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		queryStr := r.FormValue("q")
-		_ = r.FormValue("db")
+		reqDB := r.FormValue("db")
 		epoch := r.FormValue("epoch")
+		// Use request db if provided, otherwise use startup dbName
+		effectiveDB := dbName
+		if reqDB != "" {
+			effectiveDB = reqDB
+		}
+		// InfluxDB 1.x default epoch is nanoseconds when not specified
+		if epoch == "" {
+			epoch = "ns"
+		}
 
 		// Parse time range from from/to parameters (milliseconds)
 		var fromMs, toMs int64
@@ -42,7 +51,7 @@ func HandleQuery(dbName string, meta *MetaStore) http.HandlerFunc {
 
 		log.Printf("[QUERY] q=%s epoch=%s from=%d to=%d", queryStr, epoch, fromMs, toMs)
 
-		conv := NewConverter(meta, dbName, fromMs, toMs, epoch)
+		conv := NewConverter(meta, effectiveDB, fromMs, toMs, epoch)
 		result, err := conv.Convert(queryStr)
 		if err != nil {
 			log.Printf("[QUERY ERROR] %v", err)
@@ -216,9 +225,10 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 
 	// Fallback time when no time column: real InfluxDB returns 0 for non-time-grouped queries
 	var fallbackTime interface{}
-	if epoch == "ms" {
+	switch epoch {
+	case "ns", "u", "us", "ms", "s", "m", "h":
 		fallbackTime = float64(0)
-	} else {
+	default:
 		fallbackTime = "1970-01-01T00:00:00Z"
 	}
 
@@ -304,34 +314,48 @@ func buildInfluxResult(measurement string, rows []map[string]interface{}, colNam
 }
 
 // formatTimeValue converts a time value to the appropriate format based on epoch parameter.
-// When epoch="ms", returns epoch milliseconds as float64 (matching real InfluxDB behavior).
-// Otherwise returns RFC3339Nano string.
+// Supports: ns (nanoseconds), u (microseconds), ms (milliseconds), s (seconds), m (minutes), h (hours).
+// When epoch is empty or unrecognized, returns RFC3339Nano string.
 func formatTimeValue(v interface{}, epoch string) interface{} {
 	var t time.Time
 	switch tv := v.(type) {
 	case time.Time:
 		t = tv
 	case string:
-		if epoch == "ms" {
-			if parsed, err := time.Parse(time.RFC3339Nano, tv); err == nil {
-				return float64(parsed.UnixMilli())
-			}
+		if parsed, err := time.Parse(time.RFC3339Nano, tv); err == nil {
+			t = parsed
+		} else {
 			return tv
 		}
-		return tv
 	default:
-		if epoch == "ms" {
-			if parsed, err := time.Parse(time.RFC3339Nano, fmt.Sprintf("%v", v)); err == nil {
-				return float64(parsed.UnixMilli())
-			}
+		if parsed, err := time.Parse(time.RFC3339Nano, fmt.Sprintf("%v", v)); err == nil {
+			t = parsed
+		} else {
+			return fmt.Sprintf("%v", v)
 		}
-		return fmt.Sprintf("%v", v)
 	}
 
-	if epoch == "ms" {
+	return timeToEpoch(t, epoch)
+}
+
+// timeToEpoch converts a time.Time to the specified epoch format.
+func timeToEpoch(t time.Time, epoch string) interface{} {
+	switch epoch {
+	case "ns":
+		return float64(t.UnixNano())
+	case "u", "us":
+		return float64(t.UnixMicro())
+	case "ms":
 		return float64(t.UnixMilli())
+	case "s":
+		return float64(t.Unix())
+	case "m":
+		return float64(t.Unix() / 60)
+	case "h":
+		return float64(t.Unix() / 3600)
+	default:
+		return t.UTC().Format(time.RFC3339Nano)
 	}
-	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // formatTime converts a time value to ISO 8601 string (kept for backward compat)

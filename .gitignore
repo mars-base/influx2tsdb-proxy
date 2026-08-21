@@ -13,3 +13,4 @@ Thumbs.db
 
 # Logs
 *.log
+influx2tsdb-proxy
