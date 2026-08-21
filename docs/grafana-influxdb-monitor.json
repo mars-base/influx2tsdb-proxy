@@ -1,0 +1,303 @@
+{
+  "dashboard": {
+    "panels": [
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 15000
+                },
+                {
+                  "color": "red",
+                  "value": 20000
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 8,
+          "h": 4
+        },
+        "id": 1,
+        "targets": [
+          {
+            "query": "SELECT sum(\"val\") FROM (SELECT last(\"online_count\") AS val FROM \"server_online\" WHERE time > now() - 5s GROUP BY \"server_id\")",
+            "rawQuery": true,
+            "resultFormat": "time_series"
+          }
+        ],
+        "title": "当前总在线人数",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 3
+                },
+                {
+                  "color": "green",
+                  "value": 5
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {
+          "x": 8,
+          "y": 0,
+          "w": 8,
+          "h": 4
+        },
+        "id": 2,
+        "targets": [
+          {
+            "query": "SELECT count(\"val\") FROM (SELECT last(\"online_count\") AS val FROM \"server_online\" WHERE time > now() - 5s GROUP BY \"server_id\")",
+            "rawQuery": true,
+            "resultFormat": "time_series"
+          }
+        ],
+        "title": "活跃服务器数量",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "purple",
+                  "value": null
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {
+          "x": 16,
+          "y": 0,
+          "w": 8,
+          "h": 4
+        },
+        "id": 4,
+        "targets": [
+          {
+            "query": "SELECT max(\"total\") FROM (SELECT sum(\"online_count\") AS total FROM \"server_online\" WHERE $timeFilter GROUP BY time(5s))",
+            "rawQuery": true,
+            "resultFormat": "time_series"
+          }
+        ],
+        "title": "峰值在线人数",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "fillOpacity": 10,
+              "lineInterpolation": "smooth",
+              "lineWidth": 2,
+              "showPoints": "never"
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 4
+        },
+        "id": 5,
+        "targets": [
+          {
+            "alias": "总在线",
+            "query": "SELECT \"total\" FROM (SELECT sum(\"online_count\") AS total FROM \"server_online\" WHERE $timeFilter GROUP BY time(5s))",
+            "rawQuery": true,
+            "resultFormat": "time_series"
+          }
+        ],
+        "title": "总在线人数趋势",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "fillOpacity": 5,
+              "lineInterpolation": "smooth",
+              "lineWidth": 1,
+              "showPoints": "never"
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 4
+        },
+        "id": 6,
+        "targets": [
+          {
+            "query": "SELECT mean(\"online_count\") FROM \"server_online\" WHERE $timeFilter GROUP BY time(10s), \"server_id\" fill(null)",
+            "rawQuery": true,
+            "resultFormat": "time_series",
+            "alias": "$tag_server_id"
+          }
+        ],
+        "title": "各服务器在线人数",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 2500
+                },
+                {
+                  "color": "red",
+                  "value": 3000
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 12
+        },
+        "id": 7,
+        "options": {
+          "displayMode": "gradient",
+          "orientation": "horizontal",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": true
+          },
+          "showUnfilled": true
+        },
+        "targets": [
+          {
+            "query": "SELECT last(\"online_count\") FROM \"server_online\" WHERE time > now() - 5s GROUP BY \"server_id\"",
+            "rawQuery": true,
+            "resultFormat": "time_series",
+            "alias": "$tag_server_id"
+          }
+        ],
+        "title": "当前各服务器在线人数",
+        "type": "bargauge"
+      },
+      {
+        "datasource": {
+          "type": "influxdb",
+          "uid": "ffvqbfm3e3a4ga"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 12
+        },
+        "id": 8,
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "values": [
+              "value",
+              "percent"
+            ]
+          },
+          "pieType": "pie"
+        },
+        "targets": [
+          {
+            "query": "SELECT sum(\"val\") FROM (SELECT last(\"online_count\") AS val FROM \"server_online\" WHERE time > now() - 5s GROUP BY \"server_id\", \"region\") GROUP BY \"region\"",
+            "rawQuery": true,
+            "resultFormat": "time_series",
+            "alias": "$tag_region"
+          }
+        ],
+        "title": "各大区在线人数占比",
+        "type": "piechart"
+      }
+    ],
+    "refresh": "5s",
+    "tags": [
+      "influxdb",
+      "realtime"
+    ],
+    "time": {
+      "from": "now-30m",
+      "to": "now"
+    },
+    "timezone": "browser",
+    "title": "游戏服务器在线统计 (InfluxDB)",
+    "uid": "influxdb-real"
+  },
+  "overwrite": true
+}
