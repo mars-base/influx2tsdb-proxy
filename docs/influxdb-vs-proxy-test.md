@@ -8,8 +8,8 @@ Verify the influx2tsdb-proxy is API-compatible with InfluxDB 1.x by comparing wr
 |-----------|---------|----------|
 | InfluxDB 1.x | `localhost:8086` | `game_monitor` |
 | influx2tsdb-proxy | `localhost:8087` | `game_monitor` *(ignored by proxy)* |
-| TimescaleDB (PostgreSQL) | `192.168.1.100:5433` | `tsdb` |
-| Grafana | `192.168.1.200:3000` | — |
+| TimescaleDB (PostgreSQL) | `10.241.21.97:5433` | `tsdb` |
+| Grafana | `10.246.36.2:3000` | — |
 
 > **Note**: `tsdb` 是 PostgreSQL 数据库名，需要预先安装 TimescaleDB 扩展。proxy 本身不管理数据库，只通过 PostgreSQL 协议读写 TimescaleDB 表。
 
@@ -213,7 +213,53 @@ for q in "${queries[@]}"; do
 done
 ```
 
-### 3.6 Response format validation
+### 3.6 Retention policy CRUD
+
+InfluxDB 1.x retention policies are per-database (affect all measurements). The proxy translates them to TimescaleDB `add_retention_policy` / `remove_retention_policy` jobs applied to all hypertables.
+
+```bash
+# CREATE: set 7-day retention as default
+echo "=== CREATE ==="
+curl -s "http://localhost:8086/query?db=game_monitor" \
+  --data-urlencode 'q=CREATE RETENTION POLICY "7d" ON "game_monitor" DURATION 7d REPLICATION 1 DEFAULT'
+curl -s "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=CREATE RETENTION POLICY "7d" ON "game_monitor" DURATION 7d REPLICATION 1 DEFAULT'
+
+# SHOW: compare output format
+echo "=== SHOW ==="
+curl -s "http://localhost:8086/query?db=game_monitor" \
+  --data-urlencode 'q=SHOW RETENTION POLICIES' | python3 -m json.tool
+curl -s "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=SHOW RETENTION POLICIES' | python3 -m json.tool
+
+# ALTER: change to 30 days
+echo "=== ALTER ==="
+curl -s "http://localhost:8086/query?db=game_monitor" \
+  --data-urlencode 'q=ALTER RETENTION POLICY "7d" ON "game_monitor" DURATION 30d'
+curl -s "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=ALTER RETENTION POLICY "7d" ON "game_monitor" DURATION 30d'
+
+# Verify TimescaleDB retention jobs
+PGPASSWORD=tsdbpass123 psql -h 10.241.21.97 -p 5433 -U dba -d tsdb -t -c \
+  "SELECT hypertable_name, config->>'drop_after' FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention';"
+# Expected: server_online | 720:00:00 (30 days)
+
+# DROP: remove retention policy
+echo "=== DROP ==="
+curl -s "http://localhost:8086/query?db=game_monitor" \
+  --data-urlencode 'q=DROP RETENTION POLICY "7d" ON "game_monitor"'
+curl -s "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=DROP RETENTION POLICY "7d" ON "game_monitor"'
+
+# Verify TimescaleDB retention jobs removed
+PGPASSWORD=tsdbpass123 psql -h 10.241.21.97 -p 5433 -U dba -d tsdb -t -c \
+  "SELECT hypertable_name, config->>'drop_after' FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention';"
+# Expected: no rows
+```
+
+**Expected**: Both endpoints accept identical InfluxQL syntax. Proxy additionally syncs to TimescaleDB hypertables in real-time.
+
+### 3.7 Response format validation
 
 Both endpoints must return InfluxDB-compatible JSON:
 
