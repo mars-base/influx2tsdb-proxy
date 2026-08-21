@@ -118,10 +118,6 @@ See [docs/influxdb-vs-proxy-test.md](docs/influxdb-vs-proxy-test.md) for the ful
 
 # 2. Run dual-write sampling (writes identical data to both InfluxDB and proxy)
 DUAL_WRITE=1 INFLUX_PORT2=8087 INFLUX_DB2=game_monitor python3 scripts/sample_online_influx.py
-
-# 3. Compare with influx CLI
-influx -host localhost -port 8086 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
-influx -host localhost -port 8087 -database game_monitor -execute "SELECT mean(online_count) FROM server_online WHERE time > now() - 5m GROUP BY time(30s)"
 ```
 
 ### influx CLI Compatibility (InfluxDB shell v1.11.8)
