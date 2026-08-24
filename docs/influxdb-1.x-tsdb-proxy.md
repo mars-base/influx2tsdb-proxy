@@ -33,7 +33,11 @@ influxdb-tsdb-proxy/
 ├── adapter/
 │   ├── meta.go              # MetaStore — 数据库/表/元数据管理 + 自动建表
 │   ├── retention.go         # RetentionStore — 保留策略 CRUD + 自动配置
-│   ├── influxql_parser.go   # InfluxQL → SQL 转换器（手写递归，无外部依赖）
+│   ├── influxql_parser.go   # InfluxQL → SQL 转换器核心（路由、SELECT 分发）
+│   ├── influxql_build.go    # SQL 构建、字段转换、查询解析
+│   ├── influxql_ddl.go      # DDL 操作（CREATE/DROP/ALTER/DELETE）
+│   ├── influxql_show.go     # SHOW 查询处理
+│   ├── influxql_where.go    # WHERE 转换、时间解析、执行格式化
 │   ├── line_protocol.go     # Line Protocol 解析器（支持带/不带时间戳）
 │   └── response.go          # InfluxDB JSON 响应格式构造
 ├── ansible/                 # Ansible 部署角色
@@ -119,6 +123,8 @@ server_online,server_id=s1,region=华东 online_count=3500i
 | `ALTER RETENTION POLICY` | 修改保留策略 + 自动配置 |
 | `DROP RETENTION POLICY` | 删除保留策略 |
 | `SHOW RETENTION POLICIES` | 列出所有策略 |
+| `DROP MEASUREMENT` | 删除 measurement（表结构 + 数据） |
+| `DELETE FROM` | 删除数据（保留表结构） |
 
 ### 子查询示例
 
@@ -138,6 +144,58 @@ SELECT sum(val) FROM (
   WHERE time > now() - interval '5 seconds'
   ORDER BY server_id, time DESC
 ) t
+```
+
+## 数据删除
+
+支持 InfluxDB 1.x 兼容的 DELETE 语法，用于删除数据点（保留表结构）。
+
+### DELETE 语法
+
+```sql
+-- 删除 measurement 的所有数据
+DELETE FROM "server_online"
+
+-- 按 tag 条件删除
+DELETE FROM "server_online" WHERE "region" = 'test'
+
+-- 按时间范围删除
+DELETE FROM "server_online" WHERE time < '2025-01-01'
+DELETE WHERE time < '2025-01-01'  -- 跨所有 measurement
+
+-- 组合条件
+DELETE FROM "server_online" WHERE "region" = 'test' AND time > '2024-12-01'
+```
+
+### DELETE vs DROP MEASUREMENT
+
+| 操作 | 行为 | PostgreSQL 映射 |
+|------|------|----------------|
+| `DELETE FROM "measurement"` | 删除数据，保留表结构和元数据 | `DELETE FROM "schema"."measurement"` |
+| `DROP MEASUREMENT "measurement"` | 删除数据 + 表结构 + 元数据 | `DROP TABLE` + 清理 `_influx_meta` |
+
+**使用场景：**
+- `DELETE`：清理测试数据、删除特定时间段/标签的数据
+- `DROP MEASUREMENT`：完全移除不再使用的 measurement
+
+### WHERE 子句支持
+
+DELETE 的 WHERE 子句支持：
+- ✅ Tag 条件：`"tag_name" = 'value'`
+- ✅ 时间条件：`time < '2025-01-01'`, `time > now() - 7d`
+- ✅ 组合条件：`AND` / `OR`
+- ❌ Field 条件（InfluxDB 1.x 也不支持）
+
+### 示例：清理测试数据
+
+```bash
+# 删除测试区域的所有数据
+curl -X POST "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=DELETE FROM "server_online" WHERE "region" = '"'"'test'"'"''
+
+# 删除 30 天前的旧数据
+curl -X POST "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=DELETE FROM "server_online" WHERE time < now() - 30d'
 ```
 
 ## 保留策略（Retention Policy）
@@ -182,13 +240,19 @@ ALTER RETENTION POLICY "keep_1d" ON "game_monitor" SHARD DURATION 10m
 
 ### 数据清理策略
 
-保留策略是清理时序数据的推荐方式：
+保留策略是清理时序数据的推荐方式，DELETE 用于精细控制：
 
-| 方式 | 机制 | 性能 |
-|------|------|------|
-| **保留策略**（推荐） | 自动 `DROP chunk` | 极快 |
-| 手动 `DELETE` | 逐行标记删除 | 慢 |
-| `drop_chunks()` | 按表清理 | 快 |
+| 方式 | 机制 | 性能 | 场景 |
+|------|------|------|------|
+| **保留策略**（推荐） | 自动 `DROP chunk` | 极快 | 自动清理过期数据 |
+| `DELETE FROM` | 逐行标记删除 | 慢 | 删除特定标签/时间段的数据 |
+| `DROP MEASUREMENT` | 删除表 + 元数据 | 快 | 完全移除不用的 measurement |
+| `drop_chunks()` | 按表清理 | 快 | 手动清理指定表的旧数据 |
+
+**推荐做法：**
+- 日常数据保留：使用保留策略自动清理
+- 删除测试数据：`DELETE FROM "measurement" WHERE "tag" = 'test'`
+- 删除历史数据：`DELETE FROM "measurement" WHERE time < '2024-01-01'`
 
 ### 列式压缩
 
