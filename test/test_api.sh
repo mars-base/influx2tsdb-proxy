@@ -56,6 +56,15 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local desc="$1" body="$2" pattern="$3"
+    if echo "$body" | grep -q "$pattern"; then
+        fail "$desc (should not contain: $pattern)"
+    else
+        pass "$desc"
+    fi
+}
+
 # Expand ${MEASUREMENT} and ${TIME_GT} placeholders in a string
 expand_vars() {
     local s="$1"
@@ -143,6 +152,10 @@ else
             # pattern is expected HTTP status code
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" -G "$URL/query" --data-urlencode "db=$DB" --data-urlencode "q=$query")
             assert_status "$desc" "$pattern" "$STATUS"
+        elif [ "$assert_type" = "notcontains" ]; then
+            # default: not contains
+            BODY=$(curl -s -G "$URL/query" --data-urlencode "db=$DB" --data-urlencode "q=$query")
+            assert_not_contains "$desc" "$BODY" "$pattern"
         else
             # default: contains
             BODY=$(curl -s -G "$URL/query" --data-urlencode "db=$DB" --data-urlencode "q=$query")
