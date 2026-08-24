@@ -1,97 +1,126 @@
-# InfluxDB 1.x → TimescaleDB 协议适配器（Go 版）
+# InfluxDB 1.x → TimescaleDB 协议适配器
 
-## Context
+## 概述
 
-已有 Grafana + TimescaleDB 和 Grafana + InfluxDB 两套监控面板。本方案构建一个轻量 Go 代理服务，暴露 InfluxDB 1.x HTTP API，但底层读写 TimescaleDB。Grafana 可以用 InfluxDB 数据源语法直接查询 TimescaleDB 中的数据。
+influx2tsdb-proxy 是一个轻量 Go 代理服务，暴露 InfluxDB 1.x HTTP API，底层读写 TimescaleDB。Grafana 可用 InfluxDB 数据源语法直接查询 TimescaleDB 中的数据。
 
 ## 架构
 
 ```
-Grafana (InfluxDB datasource, port 8087)
+Grafana (InfluxDB datasource)
     │
-    ├── GET  /ping         → return 204
-    ├── POST /write?db=xxx → parse Line Protocol → INSERT INTO TimescaleDB
-    ├── GET  /query?q=...  → parse InfluxQL → SQL → TimescaleDB → InfluxDB JSON response
-    └── GET  /debug/vars   → minimal JSON
+    ├── GET  /ping              → 204 + X-Influxdb-Version: 1.11.8
+    ├── POST /write?db=xxx      → Line Protocol → INSERT INTO schema.hypertable
+    ├── GET  /query?q=...       → InfluxQL → SQL → TimescaleDB → InfluxDB JSON
+    └── GET  /debug/vars        → {}
          │
          ▼
-    pgx connection pool → pgbouncer:5433 → TimescaleDB (tsdb)
+    pgxpool → PostgreSQL + TimescaleDB
+         │
+         ├── game_monitor schema (InfluxDB database)
+         │   └── server_online (hypertable)
+         │
+         └── app_metrics schema (InfluxDB database)
+             └── requests (hypertable)
 ```
 
 ## 项目结构
 
 ```
-tools/influxdb-adapter/
-├── main.go              # 入口，HTTP server + 路由
-├── config.go            # 环境变量配置
-├── handler_ping.go      # /ping, /debug/vars
-├── handler_write.go     # /write — Line Protocol 解析 + 写入
-├── handler_query.go     # /query — InfluxQL 解析 + SQL 转换 + 响应
-├── influxql_parser.go   # InfluxQL → SQL 转换器
-├── line_protocol.go     # Line Protocol 解析器
-├── meta.go              # measurement/tag/field 元数据管理
-├── response.go          # InfluxDB JSON 响应格式构造
-├── go.mod
-└── go.sum
+influxdb-tsdb-proxy/
+├── main.go                  # 入口，HTTP server + 路由 + CLI flags
+├── Makefile                 # build / cross-compile
+├── adapter/
+│   ├── meta.go              # MetaStore — 数据库/表/元数据管理 + 自动建表
+│   ├── retention.go         # RetentionStore — 保留策略 CRUD + 自动配置
+│   ├── influxql_parser.go   # InfluxQL → SQL 转换器（手写递归，无外部依赖）
+│   ├── line_protocol.go     # Line Protocol 解析器（支持带/不带时间戳）
+│   └── response.go          # InfluxDB JSON 响应格式构造
+├── ansible/                 # Ansible 部署角色
+│   ├── playbooks/
+│   └── roles/
+└── docs/
+    ├── influxdb-vs-proxy-test.md   # 对比测试指南
+    └── grafana-*.json               # Grafana 面板 JSON
 ```
 
 依赖：
-- `github.com/jackc/pgx/v5` — PostgreSQL 驱动（高性能，原生支持 pgxpool）
-- `github.com/influxdata/influxql` — InfluxQL 官方 AST parser（用于解析 InfluxQL → AST → SQL）
+- `github.com/jackc/pgx/v5` — PostgreSQL 驱动
 
-## 需要支持的 InfluxQL 查询
+## 多数据库架构
 
-从 `docs/grafana-influxdb-monitor.json` 提取的 7 条真实查询：
+每个 InfluxDB 数据库映射为一个 PostgreSQL schema：
 
-| # | 面板 | InfluxQL |
-|---|------|----------|
-| 1 | 当前总在线 | `SELECT sum("val") FROM (SELECT last("online_count") AS val FROM "server_online" WHERE time > now() - 5s GROUP BY "server_id")` |
-| 2 | 活跃服务器 | `SELECT count("val") FROM (SELECT last("online_count") AS val FROM "server_online" WHERE time > now() - 5s GROUP BY "server_id")` |
-| 3 | 峰值在线 | `SELECT max("total") FROM (SELECT sum("online_count") AS total FROM "server_online" GROUP BY time(5s))` |
-| 4 | 总在线趋势 | `SELECT "total" FROM (SELECT sum("online_count") AS total FROM "server_online" WHERE $timeFilter GROUP BY time(5s))` |
-| 5 | 各服在线 | `SELECT mean("online_count") FROM "server_online" WHERE $timeFilter GROUP BY time(10s), "server_id" fill(null)` |
-| 6 | 各服柱状图 | `SELECT last("online_count") FROM "server_online" WHERE time > now() - 3s GROUP BY "server_id"` |
-| 7 | 大区占比饼图 | `SELECT sum("val") FROM (SELECT last("online_count") AS val FROM "server_online" WHERE time > now() - 5s GROUP BY "server_id", "region") GROUP BY "region"` |
+| InfluxDB 操作 | PostgreSQL 对应 |
+|--------------|----------------|
+| `CREATE DATABASE "mydb"` | `CREATE SCHEMA "mydb"` |
+| `DROP DATABASE "mydb"` | `DROP SCHEMA "mydb" CASCADE` |
+| `POST /write?db=mydb` | `INSERT INTO "mydb".measurement` |
+| `GET /query?db=mydb` | `SELECT FROM "mydb".measurement` |
 
-Grafana 还会发送元数据查询：
-- `SHOW DATABASES`
-- `SHOW MEASUREMENTS`
-- `SHOW TAG VALUES FROM "server_online" WITH KEY = "server_id"`
-- `SHOW FIELD KEYS FROM "server_online"`
-- `CREATE DATABASE "xxx"` (no-op)
+元数据表（public schema）：
 
-## InfluxQL → SQL 转换规则
+| 表 | 用途 |
+|---|------|
+| `_influx_databases` | 数据库列表 |
+| `_influx_meta` | measurement/tag/field 元数据（含 `db_name`） |
+| `_retention_policy` | 保留策略（含 `db_name`，复合主键） |
 
-### 使用 `influxdata/influxql` AST
+数据库自动创建：首次写入时自动创建 schema 和默认 `autogen` 保留策略。
 
-利用官方 parser 将 InfluxQL 解析为 AST，然后遍历 AST 节点生成 SQL：
+## Line Protocol 解析
 
-```go
-stmt, err := influxql.ParseStatement(queryString)
-// stmt 可能是 *influxql.SelectStatement, *influxql.ShowMeasurementsStatement 等
+支持带时间戳和不带时间戳两种格式：
+
 ```
+# 带时间戳（纳秒级 Unix 时间戳）
+server_online,server_id=s1,region=华东 online_count=3500i 1724140800000000000
+
+# 不带时间戳（使用服务端当前时间）
+server_online,server_id=s1,region=华东 online_count=3500i
+```
+
+→ tags: `{server_id: "s1", region: "华东"}`
+→ fields: `{online_count: 3500}` (integer)
+→ timestamp: nanoseconds → `time.Time`（或 `time.Now().UTC()`）
+
+## InfluxQL → SQL 转换
 
 ### 聚合函数
 
 | InfluxQL | SQL |
 |----------|-----|
 | `mean("field")` | `avg(field)` |
-| `sum("field")` | `sum(field)` |
-| `max/min("field")` | `max/min(field)` |
-| `count("field")` | `count(field)` |
-| `last("field")` | 子查询: `DISTINCT ON + ORDER BY time DESC` |
-| `first("field")` | 子查询: `DISTINCT ON + ORDER BY time ASC` |
+| `sum/max/min/count("field")` | `sum/max/min/count(field)` |
+| `last("field")` | `DISTINCT ON + ORDER BY time DESC` |
+| `first("field")` | `DISTINCT ON + ORDER BY time ASC` |
 
 ### 时间分组
 
 | InfluxQL | SQL |
 |----------|-----|
 | `GROUP BY time(5s)` | `GROUP BY time_bucket('5s', time)` |
-| `GROUP BY time(10s), "tag"` | `GROUP BY time_bucket('10s', time), tag` |
-| `$timeFilter` | `time >= $from AND time <= $to` (从 epoch 参数解析) |
 | `time > now() - 5s` | `time > now() - interval '5 seconds'` |
+| `$timeFilter` | `time >= $from AND time <= $to` |
 
-### 子查询转换示例
+### 支持的查询类型
+
+| InfluxQL | 说明 |
+|----------|------|
+| `SELECT ... FROM` | 时间序列查询（聚合 + GROUP BY） |
+| `SHOW DATABASES` | 返回当前请求的 db |
+| `SHOW MEASUREMENTS` | 查 `_influx_meta` |
+| `SHOW TAG KEYS` | 查 tag 列 |
+| `SHOW TAG VALUES` | `SELECT DISTINCT` tag 列 |
+| `SHOW FIELD KEYS` | 查 field 列 |
+| `CREATE DATABASE` | 创建 schema + 元数据 |
+| `DROP DATABASE` | 删除 schema + 清理元数据 |
+| `CREATE RETENTION POLICY` | 创建保留策略 + 自动配置 |
+| `ALTER RETENTION POLICY` | 修改保留策略 + 自动配置 |
+| `DROP RETENTION POLICY` | 删除保留策略 |
+| `SHOW RETENTION POLICIES` | 列出所有策略 |
+
+### 子查询示例
 
 ```
 # InfluxQL:
@@ -105,235 +134,102 @@ SELECT sum("val") FROM (
 # → SQL:
 SELECT sum(val) FROM (
   SELECT DISTINCT ON (server_id) online_count AS val
-  FROM server_online
+  FROM "game_monitor"."server_online"
   WHERE time > now() - interval '5 seconds'
   ORDER BY server_id, time DESC
 ) t
 ```
 
-```
-# InfluxQL (双层 GROUP BY):
-SELECT sum("val") FROM (
-  SELECT last("online_count") AS val
-  FROM "server_online"
-  WHERE time > now() - 5s
-  GROUP BY "server_id", "region"
-) GROUP BY "region"
+## 保留策略（Retention Policy）
 
-# → SQL:
-SELECT region, sum(val) FROM (
-  SELECT DISTINCT ON (server_id, region) online_count AS val, region
-  FROM server_online
-  WHERE time > now() - interval '5 seconds'
-  ORDER BY server_id, region, time DESC
-) t GROUP BY region
-```
+支持 InfluxDB 1.x 标准的 per-database 保留策略 CRUD。
 
-### last() 实现
+### 最低保留时间
 
-InfluxDB `last()` = 每组最新一条记录。用 PostgreSQL `DISTINCT ON`：
-```sql
-SELECT DISTINCT ON (server_id) online_count AS val
-FROM server_online WHERE time > now() - interval '5 seconds'
-ORDER BY server_id, time DESC
-```
+**15 分钟**。低于 15 分钟的 duration 会返回错误。`INF`（无限保留）不受限制。
 
-## Measurement → 表映射
+### 自动配置
 
-### 元数据表
+设置保留策略时，proxy 自动为所有 hypertable 配置 **chunk interval** 和 **compression policy**：
 
-```sql
-CREATE TABLE IF NOT EXISTS _influx_meta (
-    measurement TEXT NOT NULL,
-    column_name TEXT NOT NULL,
-    column_type TEXT NOT NULL,  -- 'tag' | 'field_int' | 'field_float' | 'field_string' | 'field_bool'
-    PRIMARY KEY (measurement, column_name)
-);
-```
+**规则：**
+- Retention < 1d：按公式计算（chunk 最小 1h，compress 最小 15m）
+- Retention 1d ~ 7d：chunk = retention / 24，compression = retention / 4
+- Retention > 7d：两者均封顶为 1 day
 
-### Line Protocol 解析
+| Retention | Chunk | Compress |
+|-----------|-------|----------|
+| 1h | 1 hour | 15 min |
+| 1d | 1 hour | 6 hours |
+| 3d | 3 hours | 18 hours |
+| 7d | 7 hours | 42 hours |
+| > 7d | 1 day | 1 day |
+| INF | 1 day | 1 day |
 
-```
-server_online,server_id=s1,region=华东 online_count=3500i 1724140800000000000
-```
+### 数据清理策略
 
-→ tags: `{server_id: "s1", region: "华东"}`
-→ fields: `{online_count: 3500}` (integer)
-→ timestamp: nanoseconds → `time.Time`
-→ measurement: `server_online`
+保留策略是清理时序数据的推荐方式：
 
-### 自动建表（首次写入时）
+| 方式 | 机制 | 性能 |
+|------|------|------|
+| **保留策略**（推荐） | 自动 `DROP chunk` | 极快 |
+| 手动 `DELETE` | 逐行标记删除 | 慢 |
+| `drop_chunks()` | 按表清理 | 快 |
 
-```sql
-CREATE TABLE IF NOT EXISTS server_online (
-    time TIMESTAMPTZ NOT NULL,
-    server_id TEXT,   -- tag
-    region TEXT,      -- tag
-    online_count BIGINT  -- field (integer)
-);
-SELECT create_hypertable('server_online', by_range('time'), if_not_exists => true);
-```
+### 列式压缩
 
-## InfluxDB JSON 响应格式
+默认启用 TimescaleDB 列式压缩：
+- `compress_segmentby`：使用 tag 列
+- `compress_orderby`：`time DESC`
+- `compress_after`：按保留时长自动计算
 
-### 时间序列查询
-
-```json
-{
-  "results": [{
-    "statement_id": 0,
-    "series": [{
-      "name": "server_online",
-      "tags": {"server_id": "s1"},
-      "columns": ["time", "mean"],
-      "values": [["2026-08-20T10:00:00Z", 3500]]
-    }]
-  }]
-}
-```
-
-### SHOW 查询
-
-```json
-{
-  "results": [{
-    "series": [{
-      "name": "server_online",
-      "columns": ["tagKey"],
-      "values": [["server_id"], ["region"]]
-    }]
-  }]
-}
-```
-
-## 核心代码结构
-
-### main.go
-
-```go
-func main() {
-    cfg := LoadConfig()
-    pool, err := pgxpool.New(ctx, cfg.PGConnString())
-    // ...
-    s := &Server{pool: pool, meta: NewMetaStore(pool)}
-    http.HandleFunc("/ping", s.handlePing)
-    http.HandleFunc("/write", s.handleWrite)
-    http.HandleFunc("/query", s.handleQuery)
-    http.HandleFunc("/debug/vars", s.handleDebugVars)
-    log.Printf("InfluxDB adapter listening on :%d", cfg.Port)
-    http.ListenAndServe(fmt.Sprintf(":%d", cfg.Port), nil)
-}
-```
-
-### config.go
-
-```go
-type Config struct {
-    Port     int    // ADAPTER_PORT, default 8087
-    PGHost   string // PG_HOST, default 10.241.21.97
-    PGPort   int    // PG_PORT, default 5433
-    PGUser   string // PG_USER, default dba
-    PGPass   string // PG_PASSWORD
-    PGDB     string // PG_DATABASE, default tsdb
-}
-```
-
-## 实现步骤
-
-### Step 1: 项目初始化 + /ping + /debug/vars
-
-- `go mod init`, 引入 pgx/v5 和 influxql
-- 基础 HTTP server，标准库 `net/http`
-- `/ping` 返回 204 + `X-Influxdb-Version: 1.11.8`
-- `/debug/vars` 返回 `{}`
-
-### Step 2: Line Protocol 写入 + /write
-
-- 手写 Line Protocol parser（influxdb 官方 Go 库 `github.com/influxdata/line-protocol` 也可以用）
-- 解析 measurement, tags, fields, timestamp
-- 自动建表 + 元数据记录
-- pgxpool 批量 INSERT
-- 连接池管理（pgxpool 默认支持）
-
-### Step 3: InfluxQL 查询解析 + /query
-
-- 用 `influxdata/influxql` 解析为 AST
-- 递归遍历 AST 节点，生成 SQL
-  - `SelectStatement` → SELECT + WHERE + GROUP BY
-  - 聚合函数 `Call` 节点 → SQL 聚合
-  - `DurationLiteral` → `time_bucket` 间隔
-  - `BinaryExpr` with `time > now() - 5s` → interval 表达式
-  - 子查询 `SelectStatement.Source` 为 `*SelectStatement` 时递归处理
-- `last()` → `DISTINCT ON` 重写
-- SQL 执行 + 结果格式化为 InfluxDB JSON
-
-### Step 4: SHOW 查询
-
-- `ShowDatabasesStatement` → 返回 `["tsdb"]`
-- `ShowMeasurementsStatement` → 查 `_influx_meta` 或 `information_schema.tables`
-- `ShowTagValuesStatement` → `SELECT DISTINCT` 查 tag 列
-- `ShowFieldKeysStatement` → 查 `_influx_meta` 的 field 列
-
-### Step 5: 编译 + 测试验证
-
-- `go build -o influxdb-adapter`
-- 启动适配器（port 8087）
-- 复用 `sample_online_influx.py` 写入（改端口为 8087）
-- Grafana 添加 InfluxDB 数据源指向 8087
-- 应用 InfluxDB 面板 JSON，验证所有 7 个面板数据正确
-
-## 构建和启动
+## 构建和部署
 
 ```bash
-# 编译
-cd tools/influxdb-adapter
-go build -o influxdb-adapter
+# 构建
+make build                        # 当前平台
+make linux                        # Linux amd64
+make cross                        # 全平台
 
-# 启动
-nohup ./influxdb-adapter > /tmp/influxdb-adapter.log 2>&1 &
-
-# 写入数据（复用 Python 采样脚本，改端口）
-INFLUX_PORT=8087 PYTHONUNBUFFERED=1 nohup python3 scripts/sample_online_influx.py > /tmp/sample_influx_adapter.log 2>&1 &
+# 运行
+influx2tsdb-proxy \
+  -pg "postgres://user:pass@host:5433/tsdb?sslmode=disable" \
+  -db game_monitor \
+  -port 8087 \
+  -pool 20 \
+  -verbose
 ```
 
-## 配置（环境变量）
+### CLI 参数
 
-| 变量 | 默认值 | 说明 |
+| 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `ADAPTER_PORT` | 8087 | HTTP 监听端口 |
-| `PG_HOST` | 127.0.0.1 | TimescaleDB host |
-| `PG_PORT` | 5432 | TimescaleDB port |
-| `PG_USER` | dba | 数据库用户 |
-| `PG_PASSWORD` | *(required)* | 数据库密码 |
-| `PG_DATABASE` | tsdb | 数据库名 |
-| `PG_POOL_SIZE` | 10 | pgxpool 最大连接数 |
+| `-pg` | *(必需)* | PostgreSQL 连接字符串 |
+| `-db` | *(自动)* | InfluxDB 数据库名（默认从 -pg 解析） |
+| `-port` | `8087` | HTTP 监听端口 |
+| `-pool` | `10` | 连接池大小 |
+| `-verbose` | `false` | 详细日志（SQL 语句和查询详情） |
 
-## 验证步骤
+### Ansible 部署
+
+```yaml
+influx2tsdb_proxy_instances:
+  - name: game
+    pg_dsn: "postgres://dba:pass@10.241.21.97:5433/tsdb?sslmode=disable"
+    db: game_monitor
+    port: 8087
+    pool_size: 20
+```
 
 ```bash
-# 1. 编译启动
-cd tools/influxdb-adapter && go build && ./influxdb-adapter
-
-# 2. 测试 /ping
-curl -i http://localhost:8087/ping
-
-# 3. 写入数据（复用采样脚本，改端口）
-INFLUX_PORT=8087 python3 scripts/sample_online_influx.py
-
-# 4. 测试查询
-curl "http://localhost:8087/query?db=game_monitor&q=SELECT%20mean(%22online_count%22)%20FROM%20%22server_online%22%20WHERE%20time%20%3E%20now()%20-%201m%20GROUP%20BY%20time(10s)"
-
-# 5. Grafana 添加 InfluxDB 数据源 → http://localhost:8087, db=game_monitor
-# 6. 导入面板 JSON，验证数据
+ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml -e "HOSTS=servers"
 ```
 
 ## 注意事项
 
-- 使用 `influxdata/influxql` 官方 AST parser，语法覆盖完整且可靠
-- `last()` 用 `DISTINCT ON` 实现，性能优于子查询 + LATERAL
-- `$timeFilter` 需要从 Grafana 发送的 `epoch` 参数（ms 级时间戳）解析
-- `fill(null)` 暂时忽略，Grafana 对空值有默认处理
-- Line Protocol 的 timestamp 是纳秒，Go `time.Unix(sec, nsec)` 原生支持
-- pgxpool 连接池天然支持高并发写入
-- 单一静态二进制，部署简单，无运行时依赖
-- 适配器是开发/测试用途，不做认证
+- InfluxQL parser 为手写递归实现，无外部依赖（不使用 `influxdata/influxql`）
+- `last()` 用 `DISTINCT ON` 实现
+- 所有数值统一序列化为 `float64`，兼容 Grafana InfluxDB 插件
+- 支持 epoch 毫秒和 RFC3339 两种时间格式输出
+- 保留策略修改立即生效，同时触发 TimescaleDB 同步
+- 后台每 5 分钟自动同步保留策略和压缩策略
