@@ -225,25 +225,33 @@ func (m *MetaStore) DatabaseExists(name string) bool {
 
 // EnsureDatabase ensures a database exists (auto-create on write)
 func (m *MetaStore) EnsureDatabase(name string) error {
-	if m.DatabaseExists(name) {
-		return nil
+	isNew := !m.DatabaseExists(name)
+
+	if isNew {
+		// Create PostgreSQL schema
+		schemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, escapeIdent(name))
+		if _, err := m.pool.Exec(m.ctx, schemaSQL); err != nil {
+			return fmt.Errorf("create schema %s: %w", name, err)
+		}
+
+		// Insert into _influx_databases
+		m.pool.Exec(m.ctx,
+			"INSERT INTO _influx_databases (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
+
+		m.mu.Lock()
+		m.databases[name] = true
+		m.mu.Unlock()
+
+		log.Printf("Auto-created database: %s", name)
 	}
 
-	// Create PostgreSQL schema
-	schemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS "%s"`, escapeIdent(name))
-	if _, err := m.pool.Exec(m.ctx, schemaSQL); err != nil {
-		return fmt.Errorf("create schema %s: %w", name, err)
+	// Always ensure retention policies exist (idempotent, cheap - checks cache first)
+	if m.retentionStore != nil {
+		if err := m.retentionStore.EnsureDatabasePolicies(name); err != nil {
+			log.Printf("Warning: failed to ensure retention policies for %s: %v", name, err)
+		}
 	}
 
-	// Insert into _influx_databases
-	m.pool.Exec(m.ctx,
-		"INSERT INTO _influx_databases (name) VALUES ($1) ON CONFLICT DO NOTHING", name)
-
-	m.mu.Lock()
-	m.databases[name] = true
-	m.mu.Unlock()
-
-	log.Printf("Auto-created database: %s", name)
 	return nil
 }
 
