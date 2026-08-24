@@ -172,11 +172,13 @@ func (rs *RetentionStore) applyCompression(dbName, tableName string, tagColumns 
 
 	// Add automatic compression policy (compress data older than compress_after)
 	compressAfter := rs.DefaultCompressAfter(dbName)
-	policySQL := fmt.Sprintf(`SELECT add_compression_policy('%s', INTERVAL '%s')`, fullName, compressAfter)
+	scheduleInterval := rs.compressionScheduleInterval()
+	policySQL := fmt.Sprintf(`SELECT add_compression_policy('%s', INTERVAL '%s', schedule_interval => INTERVAL '%s')`,
+		fullName, compressAfter, scheduleInterval)
 	if _, err := rs.pool.Exec(rs.ctx, policySQL); err != nil {
 		log.Printf("Warning: add compression policy on %s: %v", fullName, err)
 	} else {
-		log.Printf("Applied compression policy: %s -> compress_after = %s", fullName, compressAfter)
+		log.Printf("Applied compression policy: %s -> compress_after = %s, schedule = %s", fullName, compressAfter, scheduleInterval)
 	}
 
 	return nil
@@ -641,6 +643,31 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 	return fmt.Sprintf("%d hours", chunkHours)
 }
 
+// compressionScheduleInterval returns how often the background compression job runs.
+// For short retention (< 1d), run every 1 minute for faster compression during testing.
+func (rs *RetentionStore) compressionScheduleInterval() string {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+
+	var defaultPolicy *RetentionPolicy
+	for _, rp := range rs.policies {
+		if rp.DBName != "" && (rp.IsDefault || rp.DurationNs > 0) {
+			if defaultPolicy == nil || rp.IsDefault {
+				defaultPolicy = rp
+			}
+		}
+	}
+	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
+		return "1 hour"
+	}
+
+	hours := defaultPolicy.DurationNs / int64(time.Hour)
+	if hours < 24 {
+		return "1 minute"
+	}
+	return "1 hour"
+}
+
 // nsToInterval converts nanoseconds to a human-readable SQL interval string
 func nsToInterval(ns int64) string {
 	d := time.Duration(ns)
@@ -705,15 +732,15 @@ func (rs *RetentionStore) DefaultCompressAfter(dbName string) string {
 	if hours > 7*24 { // > 7d, cap at 1 day
 		return "1 day"
 	}
-	compressHours := hours / 4
+	compressAfter := hours / 4
 
 	switch {
-	case compressHours < 1:
-		return "15 minutes"
-	case compressHours < 24:
-		return fmt.Sprintf("%d hours", compressHours)
+	case compressAfter < 1:
+		return "10 seconds"
+	case compressAfter < 24:
+		return fmt.Sprintf("%d hours", compressAfter)
 	default:
-		return fmt.Sprintf("%d hours", compressHours)
+		return fmt.Sprintf("%d hours", compressAfter)
 	}
 }
 
