@@ -6,11 +6,14 @@ Grafana can use InfluxDB datasource to query TimescaleDB data transparently.
 
 ## Features
 
+- Multi-database support (each InfluxDB database = PostgreSQL schema)
 - InfluxDB 1.x HTTP API compatible (`/ping`, `/write`, `/query`, `/debug/vars`)
 - Line Protocol parser (measurement, tags, fields, timestamp)
 - InfluxQL to SQL translation (aggregations, `time_bucket`, subqueries, `last()` → `DISTINCT ON`)
-- Retention policy CRUD (`CREATE / ALTER / DROP / SHOW RETENTION POLICY`) with automatic TimescaleDB sync
+- Per-database retention policy CRUD (`CREATE / ALTER / DROP / SHOW RETENTION POLICY`) with automatic TimescaleDB sync
+- Auto database creation on write (matching InfluxDB behavior)
 - Auto table and hypertable creation with metadata tracking
+- `CREATE / DROP DATABASE` support
 - `SHOW DATABASES / MEASUREMENTS / TAG VALUES / FIELD KEYS` support
 - TimescaleDB extension auto-detection and creation
 - Cross-platform builds (Linux / macOS / Windows, amd64 + arm64)
@@ -26,13 +29,35 @@ Grafana can use InfluxDB datasource to query TimescaleDB data transparently.
 Grafana (InfluxDB datasource)
     │
     ├── GET  /ping         → 204 + X-Influxdb-Version
-    ├── POST /write?db=xxx → Line Protocol → INSERT INTO TimescaleDB
+    ├── POST /write?db=xxx → Line Protocol → INSERT INTO TimescaleDB schema
     ├── GET  /query?q=...  → InfluxQL → SQL → TimescaleDB → InfluxDB JSON
     └── GET  /debug/vars   → {}
          │
          ▼
     pgxpool → TimescaleDB
+         │
+         ├── game_monitor schema (InfluxDB database)
+         │   ├── server_online (hypertable)
+         │   └── player_stats (hypertable)
+         │
+         └── app_metrics schema (InfluxDB database)
+             ├── requests (hypertable)
+             └── errors (hypertable)
 ```
+
+### Multi-Database Mapping
+
+Each InfluxDB database maps to a PostgreSQL schema:
+
+- InfluxDB `CREATE DATABASE "mydb"` → PostgreSQL `CREATE SCHEMA "mydb"`
+- InfluxDB `DROP DATABASE "mydb"` → PostgreSQL `DROP SCHEMA "mydb" CASCADE`
+- Writes to `?db=mydb` → Tables created in `"mydb"` schema
+- Queries with `?db=mydb` → Only access `"mydb"` schema
+
+Metadata tables in the public schema:
+- `_influx_databases` — List of all databases
+- `_influx_meta` — Measurement/tag/field metadata (with `db_name` column)
+- `_retention_policy` — Retention policies (with `db_name` column)
 
 ## Usage
 
@@ -76,7 +101,7 @@ PG_DSN="postgres://user:pass@host:port/db" make run
 
 ## Retention Policy
 
-Supports InfluxDB 1.x retention policy CRUD, automatically syncing to TimescaleDB's native retention policy via `add_retention_policy`.
+Supports InfluxDB 1.x per-database retention policy CRUD. Each database maintains its own retention policies independently, matching InfluxDB 1.x semantics.
 
 | InfluxQL | Description |
 |----------|-------------|
@@ -85,13 +110,28 @@ Supports InfluxDB 1.x retention policy CRUD, automatically syncing to TimescaleD
 | `DROP RETENTION POLICY "rp_7d" ON "db"` | Delete policy |
 | `SHOW RETENTION POLICIES ON "db"` | List all policies |
 
+### Per-Database Isolation
+
+Retention policies are stored per-database in the `_retention_policy` metadata table with composite primary key `(db_name, name)`. Different databases can have identically-named policies that are completely independent:
+
+```sql
+-- game_monitor can have its own "autogen" policy
+CREATE RETENTION POLICY "autogen" ON "game_monitor" DURATION 7d REPLICATION 1 DEFAULT
+
+-- testdb can have a different "autogen" policy
+CREATE RETENTION POLICY "autogen" ON "testdb" DURATION 30d REPLICATION 1 DEFAULT
+
+-- These are independent and do not conflict
+```
+
 ### How It Works
 
-- Policies are stored in the `_retention_policy` metadata table
-- The **default** policy is applied to all hypertables (InfluxDB retention is per-database)
+- Policies are stored in the `_retention_policy` metadata table with `db_name` as part of the composite key
+- The **default** policy is applied to all hypertables within that database's schema
 - `CREATE / ALTER / DROP` trigger immediate sync to TimescaleDB; a background sync runs every 5 minutes
 - Duration formats: `7d`, `168h`, `30d`, `1w`, `INF` / `0s` (infinite = no retention)
 - `DROP` removes TimescaleDB retention jobs when no default policy remains
+- Each database automatically gets an `autogen` policy on creation (matching InfluxDB behavior)
 
 ## Subquery Example
 

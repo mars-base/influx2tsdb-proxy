@@ -7,11 +7,11 @@ Verify the influx2tsdb-proxy is API-compatible with InfluxDB 1.x by comparing wr
 | Component | Address | Database |
 |-----------|---------|----------|
 | InfluxDB 1.x | `localhost:8086` | `game_monitor` |
-| influx2tsdb-proxy | `localhost:8087` | `game_monitor` *(ignored by proxy)* |
+| influx2tsdb-proxy | `localhost:8087` | `game_monitor` (or any db) |
 | TimescaleDB (PostgreSQL) | `10.241.21.97:5433` | `tsdb` |
 | Grafana | `10.246.36.2:3000` | — |
 
-> **Note**: `tsdb` 是 PostgreSQL 数据库名，需要预先安装 TimescaleDB 扩展。proxy 本身不管理数据库，只通过 PostgreSQL 协议读写 TimescaleDB 表。
+> **Note**: `tsdb` 是 PostgreSQL 数据库名。Proxy 支持多数据库，每个 InfluxDB 数据库映射为一个 PostgreSQL schema（如 `game_monitor` 数据库对应 `game_monitor` schema）。写入和查询时通过 `db=` 参数指定目标数据库。
 
 ### Prerequisites
 
