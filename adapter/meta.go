@@ -88,6 +88,10 @@ func (m *MetaStore) Initialize() error {
 }
 
 func (m *MetaStore) loadSchemas() error {
+	// Reset caches before reloading to avoid duplicates on repeated calls
+	m.tables = make(map[string]*TableSchema)
+	m.databases = make(map[string]bool)
+
 	rows, err := m.pool.Query(m.ctx, "SELECT db_name, measurement, column_name, column_type FROM _influx_meta ORDER BY db_name, measurement, column_name")
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
