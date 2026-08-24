@@ -217,6 +217,10 @@ done
 
 InfluxDB 1.x retention policies are per-database (affect all measurements). The proxy translates them to TimescaleDB `add_retention_policy` / `remove_retention_policy` jobs applied to all hypertables.
 
+Additionally, the proxy **auto-configures chunk interval and compression** based on the retention duration:
+- **Chunk interval** = `retention_duration / 24` (minimum 1h, maximum 1d for > 7d)
+- **Compression** = `retention_duration / 4` (minimum 15m, maximum 1d for > 7d)
+
 ```bash
 # CREATE: set 7-day retention as default
 echo "=== CREATE ==="
@@ -232,17 +236,41 @@ curl -s "http://localhost:8086/query?db=game_monitor" \
 curl -s "http://localhost:8087/query?db=game_monitor" \
   --data-urlencode 'q=SHOW RETENTION POLICIES' | python3 -m json.tool
 
+# Verify TimescaleDB auto-configuration (chunk + compression + retention)
+# Expected for 7d: chunk=7h (168h/24), compress=42h (168h/4), retention=168h
+PGPASSWORD=tsdbpass123 psql -h 10.241.21.97 -p 5433 -U dba -d tsdb -t -c \
+  "SELECT d.hypertable_name,
+     d.time_interval as chunk_interval,
+     jc.config->>'compress_after' as compress_after,
+     jr.config->>'drop_after' as retention
+   FROM timescaledb_information.dimensions d
+   LEFT JOIN timescaledb_information.jobs jc ON jc.hypertable_schema = d.hypertable_schema AND jc.hypertable_name = d.hypertable_name AND jc.proc_name = 'policy_compression'
+   LEFT JOIN timescaledb_information.jobs jr ON jr.hypertable_schema = d.hypertable_schema AND jr.hypertable_name = d.hypertable_name AND jr.proc_name = 'policy_retention'
+   WHERE d.hypertable_schema = 'game_monitor';"
+
+# ALTER: change to 1 day
+echo "=== ALTER to 1d ==="
+curl -s "http://localhost:8087/query?db=game_monitor" \
+  --data-urlencode 'q=ALTER RETENTION POLICY "7d" ON "game_monitor" DURATION 1d'
+# Expected: chunk=1h (24h/24), compress=6h (24h/4), retention=24h
+PGPASSWORD=tsdbpass123 psql -h 10.241.21.97 -p 5433 -U dba -d tsdb -t -c \
+  "SELECT d.hypertable_name, d.time_interval, jc.config->>'compress_after', jr.config->>'drop_after'
+   FROM timescaledb_information.dimensions d
+   LEFT JOIN timescaledb_information.jobs jc ON jc.hypertable_schema = d.hypertable_schema AND jc.hypertable_name = d.hypertable_name AND jc.proc_name = 'policy_compression'
+   LEFT JOIN timescaledb_information.jobs jr ON jr.hypertable_schema = d.hypertable_schema AND jr.hypertable_name = d.hypertable_name AND jr.proc_name = 'policy_retention'
+   WHERE d.hypertable_schema = 'game_monitor';"
+
 # ALTER: change to 30 days
-echo "=== ALTER ==="
-curl -s "http://localhost:8086/query?db=game_monitor" \
-  --data-urlencode 'q=ALTER RETENTION POLICY "7d" ON "game_monitor" DURATION 30d'
+echo "=== ALTER to 30d ==="
 curl -s "http://localhost:8087/query?db=game_monitor" \
   --data-urlencode 'q=ALTER RETENTION POLICY "7d" ON "game_monitor" DURATION 30d'
-
-# Verify TimescaleDB retention jobs
+# Expected: chunk=1d (>7d capped), compress=1d (>7d capped), retention=720h
 PGPASSWORD=tsdbpass123 psql -h 10.241.21.97 -p 5433 -U dba -d tsdb -t -c \
-  "SELECT hypertable_name, config->>'drop_after' FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention';"
-# Expected: server_online | 720:00:00 (30 days)
+  "SELECT d.hypertable_name, d.time_interval, jc.config->>'compress_after', jr.config->>'drop_after'
+   FROM timescaledb_information.dimensions d
+   LEFT JOIN timescaledb_information.jobs jc ON jc.hypertable_schema = d.hypertable_schema AND jc.hypertable_name = d.hypertable_name AND jc.proc_name = 'policy_compression'
+   LEFT JOIN timescaledb_information.jobs jr ON jr.hypertable_schema = d.hypertable_schema AND jr.hypertable_name = d.hypertable_name AND jr.proc_name = 'policy_retention'
+   WHERE d.hypertable_schema = 'game_monitor';"
 
 # DROP: remove retention policy
 echo "=== DROP ==="
@@ -257,7 +285,7 @@ PGPASSWORD=tsdbpass123 psql -h 10.241.21.97 -p 5433 -U dba -d tsdb -t -c \
 # Expected: no rows
 ```
 
-**Expected**: Both endpoints accept identical InfluxQL syntax. Proxy additionally syncs to TimescaleDB hypertables in real-time.
+**Expected**: Both endpoints accept identical InfluxQL syntax. Proxy additionally syncs to TimescaleDB hypertables in real-time, auto-configuring chunk interval and compression policy.
 
 ### 3.7 Response format validation
 
