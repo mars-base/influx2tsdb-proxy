@@ -588,7 +588,9 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 	}
 
 	hours := defaultPolicy.DurationNs / int64(time.Hour)
-	hours = min(hours, 30*24) // cap at 30d
+	if hours > 7*24 { // > 7d, cap at 1 day
+		return "1 day"
+	}
 	chunkHours := hours / 24
 	if chunkHours < 1 {
 		return "1 hour"
@@ -624,9 +626,12 @@ func (rs *RetentionStore) DefaultCompressAfter(dbName string) string {
 		return "1 day"
 	}
 
-	// compress_after = retention_duration / 4, capped at 7 days
+	// compress_after = retention_duration / 4, capped at 1 day for > 7d
 	hours := defaultPolicy.DurationNs / int64(time.Hour)
-	compressHours := min(hours/4, 7*24) // cap at 7d
+	if hours > 7*24 { // > 7d, cap at 1 day
+		return "1 day"
+	}
+	compressHours := hours / 4
 
 	switch {
 	case compressHours < 1:
@@ -634,7 +639,7 @@ func (rs *RetentionStore) DefaultCompressAfter(dbName string) string {
 	case compressHours < 24:
 		return fmt.Sprintf("%d hours", compressHours)
 	default:
-		return fmt.Sprintf("%d days", compressHours/24)
+		return fmt.Sprintf("%d hours", compressHours)
 	}
 }
 

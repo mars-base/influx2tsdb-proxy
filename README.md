@@ -162,28 +162,35 @@ SELECT drop_chunks('"game_monitor"."server_online"', older_than => INTERVAL '1 d
 
 When a retention policy is set (via `CREATE / ALTER RETENTION POLICY`), the proxy automatically configures **chunk interval** and **compression policy** for all hypertables in the database.
 
-**Chunk interval** = `retention_duration / 24` (capped at 30d)
+**Rules:**
+- Retention < 1d: calculated by formula (minimum chunk 1h, minimum compress 15m)
+- Retention 1d ~ 7d: chunk = retention / 24, compression = retention / 4
+- Retention > 7d: both capped at 1 day
+
+**Chunk interval**
 
 | Retention Duration | Chunk Interval | Reasoning |
 |---|---|---|
-| 1h | 1 hour | < 24h → minimum |
+| 1h | 1 hour | < 1d, minimum |
 | 1d | 1 hour | 24h / 24 = 1h |
+| 3d | 3 hours | 72h / 24 = 3h |
 | 7d | 7 hours | 168h / 24 = 7h |
-| 30d | 30 hours | 720h / 24 = 30h |
-| 90d | 30 hours | capped at 30d |
-| 365d | 30 hours | capped at 30d |
+| 30d | 1 day | > 7d, capped |
+| 90d | 1 day | > 7d, capped |
+| 365d | 1 day | > 7d, capped |
 | INF (no retention) | 1 day | Default fallback |
 
-**Compression** = `retention_duration / 4` (capped at 7d)
+**Compression**
 
 | Retention Duration | compress_after | Reasoning |
 |---|---|---|
-| 1h | 15 minutes | < 1h → minimum |
+| 1h | 15 minutes | < 1d, minimum |
 | 1d | 6 hours | 24h / 4 = 6h |
-| 7d | 1 day 18h | 168h / 4 = 42h |
-| 30d | 7 days | 720h / 4 = 180h, capped at 7d |
-| 90d | 7 days | capped at 7d |
-| 365d | 7 days | capped at 7d |
+| 3d | 18 hours | 72h / 4 = 18h |
+| 7d | 42 hours | 168h / 4 = 42h |
+| 30d | 1 day | > 7d, capped |
+| 90d | 1 day | > 7d, capped |
+| 365d | 1 day | > 7d, capped |
 | INF (no retention) | 1 day | Default fallback |
 
 **When applied:**
