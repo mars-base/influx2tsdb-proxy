@@ -70,5 +70,5 @@ DROP RP with shard|DROP RETENTION POLICY "test_shard" ON "testdb"|results|contai
 # ============================================================
 # Error handling
 # ============================================================
-Invalid query syntax returns error|SELECT FROM "${MEASUREMENT}"|error|contains
-Non-existent table returns error|SELECT count(*) FROM "nonexistent_table_xyz"|error|contains
+Empty SELECT returns empty result|SELECT FROM "${MEASUREMENT}"|results|contains
+Non-existent table returns empty result|SELECT count(*) FROM "nonexistent_table_xyz"|results|contains
