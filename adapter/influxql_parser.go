@@ -90,7 +90,13 @@ func (c *Converter) handleShowRetentionPolicies() *InfluxDBResponse {
 	for _, rp := range policies {
 		// Normalize duration to Go format (e.g., 7d → 168h0m0s)
 		dur := time.Duration(rp.DurationNs).String()
-		sgd := shardGroupDuration(rp.DurationNs)
+		// Use stored shard duration if set, otherwise auto-calculate
+		var sgd string
+		if rp.ShardDurationNs > 0 {
+			sgd = time.Duration(rp.ShardDurationNs).String()
+		} else {
+			sgd = shardGroupDuration(rp.DurationNs)
+		}
 		values = append(values, []interface{}{rp.Name, dur, sgd, 1, rp.IsDefault})
 	}
 
@@ -117,7 +123,7 @@ func extractOnDB(query string) string {
 }
 
 // handleCreateRetentionPolicy handles CREATE RETENTION POLICY
-// Syntax: CREATE RETENTION POLICY "name" ON "db" DURATION 7d REPLICATION 1 DEFAULT
+// Syntax: CREATE RETENTION POLICY "name" ON "db" DURATION 7d REPLICATION 1 [SHARD DURATION 5m] DEFAULT
 func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse {
 	if c.retentionStore == nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "retention store not initialized"}}}
@@ -139,7 +145,7 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing retention policy name"}}}
 	}
 
-	// Extract DURATION
+	// Extract DURATION (find first occurrence, which is the main DURATION, not SHARD DURATION)
 	durIdx := strings.Index(upperRest, "DURATION")
 	if durIdx < 0 {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION clause"}}}
@@ -150,6 +156,14 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION value"}}}
 	}
 
+	// Extract SHARD DURATION (optional)
+	var shardDuration string
+	shardIdx := strings.Index(upperRest, "SHARD DURATION")
+	if shardIdx >= 0 {
+		afterShard := strings.TrimSpace(rest[shardIdx+14:])
+		shardDuration = extractFirstToken(afterShard)
+	}
+
 	// Check DEFAULT — only search after REPLICATION to avoid matching policy name
 	replIdx := strings.LastIndex(upperRest, "REPLICATION")
 	afterRepl := ""
@@ -158,7 +172,7 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 	}
 	isDefault := strings.Contains(afterRepl, "DEFAULT")
 
-	if err := c.retentionStore.CreatePolicy(targetDB, name, duration, isDefault); err != nil {
+	if err := c.retentionStore.CreatePolicy(targetDB, name, duration, shardDuration, isDefault); err != nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 	}
 
@@ -171,7 +185,7 @@ func (c *Converter) handleCreateRetentionPolicy(query string) *InfluxDBResponse 
 }
 
 // handleAlterRetentionPolicy handles ALTER RETENTION POLICY
-// Syntax: ALTER RETENTION POLICY "name" ON "db" DURATION 30d DEFAULT
+// Syntax: ALTER RETENTION POLICY "name" ON "db" [DURATION 30d] [SHARD DURATION 5m] DEFAULT
 func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 	if c.retentionStore == nil {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "retention store not initialized"}}}
@@ -193,15 +207,35 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing retention policy name"}}}
 	}
 
-	// Extract DURATION (optional for ALTER)
+	// Extract DURATION (optional for ALTER) — find first DURATION but not SHARD DURATION
+	var duration string
 	durIdx := strings.Index(upperRest, "DURATION")
 	if durIdx >= 0 {
+		// Check if this is SHARD DURATION
+		if durIdx >= 6 && upperRest[durIdx-6:durIdx] == "SHARD " {
+			// This is SHARD DURATION, skip it; look for main DURATION elsewhere
+			durIdx = -1
+		}
+	}
+	if durIdx >= 0 {
 		afterDur := strings.TrimSpace(rest[durIdx+8:])
-		duration := extractFirstToken(afterDur)
+		duration = extractFirstToken(afterDur)
 		if duration == "" {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing DURATION value"}}}
 		}
-		if err := c.retentionStore.AlterPolicy(targetDB, name, duration); err != nil {
+	}
+
+	// Extract SHARD DURATION (optional)
+	var shardDuration string
+	shardIdx := strings.Index(upperRest, "SHARD DURATION")
+	if shardIdx >= 0 {
+		afterShard := strings.TrimSpace(rest[shardIdx+14:])
+		shardDuration = extractFirstToken(afterShard)
+	}
+
+	// Only call AlterPolicy if duration or shard duration changed
+	if duration != "" || shardDuration != "" {
+		if err := c.retentionStore.AlterPolicy(targetDB, name, duration, shardDuration); err != nil {
 			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
 		}
 	}
@@ -223,7 +257,7 @@ func (c *Converter) handleAlterRetentionPolicy(query string) *InfluxDBResponse {
 	}
 
 	// Sync to TimescaleDB if anything changed
-	if durIdx >= 0 || hasAlterDefault {
+	if duration != "" || shardDuration != "" || hasAlterDefault {
 		if err := c.retentionStore.SyncToTimescaleDB(targetDB); err != nil {
 			log.Printf("Warning: retention sync after ALTER failed: %v", err)
 		}

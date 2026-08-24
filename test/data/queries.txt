@@ -44,3 +44,22 @@ subquery with outer GROUP BY returns values|SELECT sum("val") FROM (SELECT last(
 # ============================================================
 now() time comparison works|SELECT last("online_count") FROM "${MEASUREMENT}" WHERE time > now() - 1000000h|"values"|contains
 fill(null) does not error|SELECT mean("online_count") FROM "${MEASUREMENT}" WHERE time > '${TIME_GT}' GROUP BY time(1h) fill(null)|results|contains
+
+# ============================================================
+# Retention Policy CRUD
+# ============================================================
+CREATE RETENTION POLICY 1h|CREATE RETENTION POLICY "test_rp" ON "testdb" DURATION 1h REPLICATION 1|results|contains
+SHOW RP after create has test_rp|SHOW RETENTION POLICIES|test_rp|contains
+ALTER RETENTION POLICY to 2h|ALTER RETENTION POLICY "test_rp" ON "testdb" DURATION 2h|results|contains
+SHOW RP after alter has 2h|SHOW RETENTION POLICIES|2h0m0s|contains
+DROP RETENTION POLICY|DROP RETENTION POLICY "test_rp" ON "testdb"|results|contains
+SHOW RP after drop missing test_rp|SHOW RETENTION POLICIES|test_rp|notcontains
+CREATE RP 15m (minimum)|CREATE RETENTION POLICY "test_min" ON "testdb" DURATION 15m REPLICATION 1|results|contains
+DROP RP 15m cleanup|DROP RETENTION POLICY "test_min" ON "testdb"|results|contains
+CREATE RP 14m below minimum|CREATE RETENTION POLICY "test_short" ON "testdb" DURATION 14m REPLICATION 1|at least 15 minutes|contains
+
+# ============================================================
+# Error handling
+# ============================================================
+Invalid query syntax returns error|SELECT FROM "${MEASUREMENT}"|error|contains
+Non-existent table returns error|SELECT count(*) FROM "nonexistent_table_xyz"|error|contains

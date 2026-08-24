@@ -16,12 +16,13 @@ import (
 
 // RetentionPolicy represents an InfluxDB retention policy
 type RetentionPolicy struct {
-	Name       string
-	DBName     string
-	Duration   string // original duration string (e.g., "7d", "168h", "INF")
-	DurationNs int64  // duration in nanoseconds (0 = infinite)
-	IsDefault  bool
-	CreatedAt  time.Time
+	Name            string
+	DBName          string
+	Duration        string // original duration string (e.g., "7d", "168h", "INF")
+	DurationNs      int64  // duration in nanoseconds (0 = infinite)
+	ShardDurationNs int64  // shard duration in nanoseconds (0 = auto-calculate)
+	IsDefault       bool
+	CreatedAt       time.Time
 }
 
 // RetentionStore manages retention policies in _retention_policy table
@@ -95,11 +96,22 @@ func (rs *RetentionStore) initialize() error {
 		log.Println("Migrated _retention_policy: added db_name column")
 	}
 
+	// Migrate: add shard_duration_ns column if missing
+	var hasShardDuration bool
+	rs.pool.QueryRow(rs.ctx,
+		"SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = '_retention_policy' AND column_name = 'shard_duration_ns')").Scan(&hasShardDuration)
+	if !hasShardDuration {
+		if _, err := rs.pool.Exec(rs.ctx, "ALTER TABLE _retention_policy ADD COLUMN shard_duration_ns BIGINT NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("migrate _retention_policy add shard_duration_ns: %w", err)
+		}
+		log.Println("Migrated _retention_policy: added shard_duration_ns column")
+	}
+
 	log.Println("Initialized _retention_policy table")
 
 	// Load existing policies
 	rows, err := rs.pool.Query(rs.ctx,
-		"SELECT db_name, name, duration, duration_ns, is_default, created_at FROM _retention_policy ORDER BY db_name, name")
+		"SELECT db_name, name, duration, duration_ns, shard_duration_ns, is_default, created_at FROM _retention_policy ORDER BY db_name, name")
 	if err != nil {
 		if strings.Contains(err.Error(), "does not exist") {
 			return nil
@@ -110,7 +122,7 @@ func (rs *RetentionStore) initialize() error {
 
 	for rows.Next() {
 		var rp RetentionPolicy
-		if err := rows.Scan(&rp.DBName, &rp.Name, &rp.Duration, &rp.DurationNs, &rp.IsDefault, &rp.CreatedAt); err != nil {
+		if err := rows.Scan(&rp.DBName, &rp.Name, &rp.Duration, &rp.DurationNs, &rp.ShardDurationNs, &rp.IsDefault, &rp.CreatedAt); err != nil {
 			return err
 		}
 		rs.policies[policyKey(rp.DBName, rp.Name)] = &rp
@@ -246,7 +258,7 @@ func (rs *RetentionStore) DropDatabasePolicies(dbName string) {
 }
 
 // CreatePolicy creates or updates a retention policy for a database
-func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault bool) error {
+func (rs *RetentionStore) CreatePolicy(dbName, name, duration, shardDuration string, isDefault bool) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -254,6 +266,15 @@ func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault 
 	durationNs, err := parseDuration(duration)
 	if err != nil {
 		return fmt.Errorf("invalid duration %q: %w", duration, err)
+	}
+
+	// Parse shard duration (0 = auto-calculate)
+	var shardDurationNs int64
+	if shardDuration != "" {
+		shardDurationNs, err = parseDuration(shardDuration)
+		if err != nil {
+			return fmt.Errorf("invalid shard duration %q: %w", shardDuration, err)
+		}
 	}
 
 	// Enforce minimum retention: 15 minutes (skip check for INF = 0)
@@ -277,13 +298,14 @@ func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault 
 	}
 
 	// Upsert policy
-	sql := `INSERT INTO _retention_policy (db_name, name, duration, duration_ns, is_default)
-		VALUES ($1, $2, $3, $4, $5)
+	sql := `INSERT INTO _retention_policy (db_name, name, duration, duration_ns, shard_duration_ns, is_default)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (db_name, name) DO UPDATE
 		SET duration = EXCLUDED.duration,
 		    duration_ns = EXCLUDED.duration_ns,
+		    shard_duration_ns = EXCLUDED.shard_duration_ns,
 		    is_default = EXCLUDED.is_default`
-	if _, err := rs.pool.Exec(rs.ctx, sql, dbName, name, duration, durationNs, isDefault); err != nil {
+	if _, err := rs.pool.Exec(rs.ctx, sql, dbName, name, duration, durationNs, shardDurationNs, isDefault); err != nil {
 		return fmt.Errorf("upsert policy: %w", err)
 	}
 
@@ -292,15 +314,17 @@ func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault 
 	if existing, ok := rs.policies[key]; ok {
 		existing.Duration = duration
 		existing.DurationNs = durationNs
+		existing.ShardDurationNs = shardDurationNs
 		existing.IsDefault = isDefault
 	} else {
 		rs.policies[key] = &RetentionPolicy{
-			Name:       name,
-			DBName:     dbName,
-			Duration:   duration,
-			DurationNs: durationNs,
-			IsDefault:  isDefault,
-			CreatedAt:  time.Now(),
+			Name:            name,
+			DBName:          dbName,
+			Duration:        duration,
+			DurationNs:      durationNs,
+			ShardDurationNs: shardDurationNs,
+			IsDefault:       isDefault,
+			CreatedAt:       time.Now(),
 		}
 	}
 
@@ -325,7 +349,7 @@ func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault 
 }
 
 // AlterPolicy updates an existing retention policy
-func (rs *RetentionStore) AlterPolicy(dbName, name, duration string) error {
+func (rs *RetentionStore) AlterPolicy(dbName, name, duration, shardDuration string) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
@@ -336,29 +360,38 @@ func (rs *RetentionStore) AlterPolicy(dbName, name, duration string) error {
 		return fmt.Errorf("retention policy %q not found in database %q", name, dbName)
 	}
 
-	// Parse duration
-	durationNs, err := parseDuration(duration)
-	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", duration, err)
+	// Parse duration (empty = keep existing)
+	if duration != "" {
+		durationNs, err := parseDuration(duration)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", duration, err)
+		}
+
+		// Enforce minimum retention: 15 minutes (skip check for INF = 0)
+		const minRetentionNs = 15 * int64(time.Minute)
+		if durationNs > 0 && durationNs < minRetentionNs {
+			return fmt.Errorf("retention duration must be at least 15 minutes, got %s", duration)
+		}
+		existing.Duration = duration
+		existing.DurationNs = durationNs
 	}
 
-	// Enforce minimum retention: 15 minutes (skip check for INF = 0)
-	const minRetentionNs = 15 * int64(time.Minute)
-	if durationNs > 0 && durationNs < minRetentionNs {
-		return fmt.Errorf("retention duration must be at least 15 minutes, got %s", duration)
+	// Parse shard duration (empty = keep existing)
+	if shardDuration != "" {
+		shardDurationNs, err := parseDuration(shardDuration)
+		if err != nil {
+			return fmt.Errorf("invalid shard duration %q: %w", shardDuration, err)
+		}
+		existing.ShardDurationNs = shardDurationNs
 	}
 
 	// Update
-	sql := `UPDATE _retention_policy SET duration = $3, duration_ns = $4 WHERE db_name = $1 AND name = $2`
-	if _, err := rs.pool.Exec(rs.ctx, sql, dbName, name, duration, durationNs); err != nil {
+	sql := `UPDATE _retention_policy SET duration = $3, duration_ns = $4, shard_duration_ns = $5 WHERE db_name = $1 AND name = $2`
+	if _, err := rs.pool.Exec(rs.ctx, sql, dbName, name, existing.Duration, existing.DurationNs, existing.ShardDurationNs); err != nil {
 		return fmt.Errorf("update policy: %w", err)
 	}
 
-	// Update cache
-	existing.Duration = duration
-	existing.DurationNs = durationNs
-
-	log.Printf("Altered retention policy: %s.%s duration=%s", dbName, name, duration)
+	log.Printf("Altered retention policy: %s.%s duration=%s shard=%d", dbName, name, existing.Duration, existing.ShardDurationNs)
 	return nil
 }
 
@@ -560,8 +593,9 @@ func (rs *RetentionStore) SyncAllDatabases() error {
 }
 
 // DefaultChunkInterval returns the chunk_time_interval based on the default
-// retention policy duration for a specific database.
-// Rule: < 1 day → 1 hour; >= 1 day → 1 day.
+// retention policy for a specific database.
+// If SHARD DURATION was explicitly set, use that value.
+// Otherwise, auto-calculate: < 1 day → 1 hour; >= 1 day → retention/24; > 7d → 1 day.
 // Returns "1 day" if no policy is set.
 func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 	rs.mu.RLock()
@@ -583,7 +617,16 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 		}
 	}
 
-	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
+	if defaultPolicy == nil {
+		return "1 day"
+	}
+
+	// If SHARD DURATION was explicitly set, use it
+	if defaultPolicy.ShardDurationNs > 0 {
+		return nsToInterval(defaultPolicy.ShardDurationNs)
+	}
+
+	if defaultPolicy.DurationNs == 0 {
 		return "1 day"
 	}
 
@@ -596,6 +639,37 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 		return "1 hour"
 	}
 	return fmt.Sprintf("%d hours", chunkHours)
+}
+
+// nsToInterval converts nanoseconds to a human-readable SQL interval string
+func nsToInterval(ns int64) string {
+	d := time.Duration(ns)
+	if d >= 24*time.Hour && d%(24*time.Hour) == 0 {
+		days := int(d / (24 * time.Hour))
+		if days == 1 {
+			return "1 day"
+		}
+		return fmt.Sprintf("%d days", days)
+	}
+	if d >= time.Hour && d%time.Hour == 0 {
+		hours := int(d / time.Hour)
+		if hours == 1 {
+			return "1 hour"
+		}
+		return fmt.Sprintf("%d hours", hours)
+	}
+	if d >= time.Minute && d%time.Minute == 0 {
+		mins := int(d / time.Minute)
+		if mins == 1 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", mins)
+	}
+	secs := int(d / time.Second)
+	if secs == 1 {
+		return "1 second"
+	}
+	return fmt.Sprintf("%d seconds", secs)
 }
 
 // DefaultCompressAfter returns the compress_after interval based on the default
