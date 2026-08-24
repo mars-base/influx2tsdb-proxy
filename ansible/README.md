@@ -56,18 +56,20 @@ cd /srv/influx2tsdb-proxy
 influx2tsdb_proxy_instances:
   - name: game
     pg_dsn: "postgres://user:pass@db1:5432/game_tsdb?sslmode=disable"
+    db: game_monitor
     port: 8087
     pool_size: 20
     verbose: true
   
   - name: monitor
     pg_dsn: "postgres://user:pass@db2:5432/monitor_tsdb?sslmode=disable"
+    db: server_metrics
     port: 8088
     pool_size: 10
     dir: /opt/influx2tsdb-proxy-monitor  # 可选，自定义目录
 
 # 全局变量（可选）
-influx2tsdb_proxy_version: "v1.0.0"  # 默认 latest
+influx2tsdb_proxy_version: "latest"  # 默认 latest，或指定 tag 如 v1.1.1
 ```
 
 ### 3. 执行 playbook
@@ -84,6 +86,7 @@ ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml -e "HOSTS=servers"
 |------|--------|------|
 | `name` | *(必需)* | 实例名称（用于进程名、目录、日志） |
 | `pg_dsn` | *(必需)* | PostgreSQL/TimescaleDB 连接字符串 |
+| `db` | *(必需)* | InfluxDB 数据库名（InfluxDB API 请求的 db 参数） |
 | `port` | `8087` | HTTP 监听端口 |
 | `pool_size` | `10` | 连接池大小 |
 | `verbose` | `false` | 启用详细日志 |
@@ -93,7 +96,7 @@ ansible-playbook -i hosts playbooks/influx2tsdb-proxy.yml -e "HOSTS=servers"
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `influx2tsdb_proxy_version` | `latest` | 版本（对应 GitHub Release tag） |
+| `influx2tsdb_proxy_version` | `latest` | 版本（`latest` 或 GitHub Release tag 如 `v1.1.1`） |
 
 ## 单机多实例示例
 
@@ -103,6 +106,7 @@ influx2tsdb_proxy_instances:
   # 游戏数据实例
   - name: game
     pg_dsn: "postgres://dba:pass@10.241.21.97:5433/game_tsdb?sslmode=disable"
+    db: game_monitor
     port: 8087
     pool_size: 20
     verbose: true
@@ -110,12 +114,14 @@ influx2tsdb_proxy_instances:
   # 监控数据实例
   - name: monitor
     pg_dsn: "postgres://dba:pass@10.241.21.97:5433/monitor_tsdb?sslmode=disable"
+    db: server_metrics
     port: 8088
     pool_size: 10
   
   # 日志数据实例（自定义目录）
   - name: logs
     pg_dsn: "postgres://dba:pass@10.241.21.97:5433/logs_tsdb?sslmode=disable"
+    db: app_logs
     port: 8089
     dir: /data/influx2tsdb-proxy-logs
 ```
