@@ -15,6 +15,8 @@ Grafana can use InfluxDB datasource to query TimescaleDB data transparently.
 - Auto table and hypertable creation with metadata tracking
 - `CREATE / DROP DATABASE` support
 - `SHOW DATABASES / MEASUREMENTS / TAG VALUES / FIELD KEYS` support
+- `DELETE FROM` support (delete data by tag or time range, preserving table structure)
+- `DROP MEASUREMENT` support (delete table + metadata)
 - TimescaleDB extension auto-detection and creation
 - Cross-platform builds (Linux / macOS / Windows, amd64 + arm64)
 
@@ -144,8 +146,8 @@ Retention policy is the **recommended way** to clean up time-series data. Timesc
 | Method | Mechanism | Performance |
 |--------|-----------|-------------|
 | **Retention policy** (recommended) | Auto `DROP chunk` (delete whole file blocks) | Very fast, near-zero overhead |
-| Manual `DELETE` | Row-by-row tombstone, requires `VACUUM` to reclaim space | Slow, generates dead tuples |
-| `TRUNCATE` | Clear entire table | Cannot filter by time |
+| `DELETE FROM` | Row-by-row deletion by tag/time condition | Moderate, preserves table structure |
+| `DROP MEASUREMENT` | Delete table + metadata | Fast, removes everything |
 
 **Per-database cleanup** (affects all measurements in the database):
 ```sql
@@ -160,6 +162,19 @@ SELECT drop_chunks('"game_monitor"."server_online"', older_than => INTERVAL '1 d
 ```
 
 **Chunk-level granularity**: retention cleanup operates on chunks. If `chunk_time_interval` is 1 day, data may be retained up to 1 extra day (a chunk is dropped only when fully expired). For finer cleanup precision, use a shorter chunk interval.
+
+**Fine-grained deletion** with `DELETE`:
+```sql
+-- Delete all data from a measurement (table structure preserved)
+DELETE FROM "server_online"
+
+-- Delete by tag condition
+DELETE FROM "server_online" WHERE "region" = 'test'
+
+-- Delete by time range
+DELETE FROM "server_online" WHERE time < '2025-01-01'
+DELETE FROM "server_online" WHERE time > now() - 30d
+```
 
 ### Auto-Configuration
 
