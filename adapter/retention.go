@@ -561,7 +561,8 @@ func (rs *RetentionStore) SyncAllDatabases() error {
 
 // DefaultChunkInterval returns the chunk_time_interval based on the default
 // retention policy duration for a specific database.
-// Returns "1 week" if no policy is set.
+// Rule: < 1 day → 1 hour; >= 1 day → 1 day.
+// Returns "1 day" if no policy is set.
 func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
@@ -583,18 +584,16 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 	}
 
 	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
-		return "1 week"
+		return "1 day"
 	}
 
 	hours := defaultPolicy.DurationNs / int64(time.Hour)
-	switch {
-	case hours < 24: // < 1 day
+	hours = min(hours, 30*24) // cap at 30d
+	chunkHours := hours / 24
+	if chunkHours < 1 {
 		return "1 hour"
-	case hours < 4320: // < 180 days
-		return "1 day"
-	default:
-		return "1 week"
 	}
+	return fmt.Sprintf("%d hours", chunkHours)
 }
 
 // DefaultCompressAfter returns the compress_after interval based on the default
@@ -622,24 +621,20 @@ func (rs *RetentionStore) DefaultCompressAfter(dbName string) string {
 	}
 
 	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
-		return "7 days"
+		return "1 day"
 	}
 
-	// compress_after = retention_duration / 4
+	// compress_after = retention_duration / 4, capped at 7 days
 	hours := defaultPolicy.DurationNs / int64(time.Hour)
-	compressHours := hours / 4
+	compressHours := min(hours/4, 7*24) // cap at 7d
 
 	switch {
 	case compressHours < 1:
 		return "15 minutes"
 	case compressHours < 24:
 		return fmt.Sprintf("%d hours", compressHours)
-	case compressHours < 168: // < 7 days
-		days := compressHours / 24
-		return fmt.Sprintf("%d days", days)
 	default:
-		weeks := compressHours / 168
-		return fmt.Sprintf("%d weeks", weeks)
+		return fmt.Sprintf("%d days", compressHours/24)
 	}
 }
 

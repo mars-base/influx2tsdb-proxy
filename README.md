@@ -158,28 +158,38 @@ SELECT drop_chunks('"game_monitor"."server_online"', older_than => INTERVAL '1 d
 
 **Chunk-level granularity**: retention cleanup operates on chunks. If `chunk_time_interval` is 1 day, data may be retained up to 1 extra day (a chunk is dropped only when fully expired). For finer cleanup precision, use a shorter chunk interval.
 
-### Columnar Compression (TimescaleDB)
+### Auto-Configuration
 
-Columnar compression is **enabled by default** on all hypertables. Compression provides 90%+ storage savings and faster aggregation queries.
+When a retention policy is set (via `CREATE / ALTER RETENTION POLICY`), the proxy automatically configures **chunk interval** and **compression policy** for all hypertables in the database.
 
-**Configuration:**
-- `compress_segmentby` — Uses tag columns (e.g., `server_id`, `region`) for optimal segment grouping
-- `compress_orderby` — `time DESC` for efficient time-series queries
-- `compress_after` — Auto-calculated from retention duration: `retention_duration / 4`
+**Chunk interval** = `retention_duration / 24` (capped at 30d)
 
-**Auto-calculation examples:**
+| Retention Duration | Chunk Interval | Reasoning |
+|---|---|---|
+| 1h | 1 hour | < 24h → minimum |
+| 1d | 1 hour | 24h / 24 = 1h |
+| 7d | 7 hours | 168h / 24 = 7h |
+| 30d | 30 hours | 720h / 24 = 30h |
+| 90d | 30 hours | capped at 30d |
+| 365d | 30 hours | capped at 30d |
+| INF (no retention) | 1 day | Default fallback |
+
+**Compression** = `retention_duration / 4` (capped at 7d)
 
 | Retention Duration | compress_after | Reasoning |
 |---|---|---|
-| 7d | 1 day | 168h / 4 = 42h → 1 day |
-| 30d | 1 week | 720h / 4 = 180h → 1 week |
-| 90d | 2 weeks | 2160h / 4 = 540h → 2 weeks |
-| 365d | 5 weeks | 8760h / 4 = 2190h → 5 weeks |
-| INF (no retention) | 7 days | Default fallback |
+| 1h | 15 minutes | < 1h → minimum |
+| 1d | 6 hours | 24h / 4 = 6h |
+| 7d | 1 day 18h | 168h / 4 = 42h |
+| 30d | 7 days | 720h / 4 = 180h, capped at 7d |
+| 90d | 7 days | capped at 7d |
+| 365d | 7 days | capped at 7d |
+| INF (no retention) | 1 day | Default fallback |
 
 **When applied:**
-- New hypertables: compression applied immediately on creation (`EnsureTable`)
-- Existing hypertables: compression applied during retention sync (every 5 minutes)
+- `CREATE / ALTER / DROP RETENTION POLICY` — triggers immediate sync
+- New hypertables: applied on creation (`EnsureTable`)
+- Existing hypertables: background sync every 5 minutes
 
 ## Subquery Example
 
