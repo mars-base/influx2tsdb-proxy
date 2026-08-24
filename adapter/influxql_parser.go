@@ -439,6 +439,12 @@ func containsSubquery(upper string) bool {
 func (c *Converter) handleSimpleSelect(query string) (*InfluxDBResponse, error) {
 	q := c.parseSelectQuery(query)
 
+	// Handle empty queries (Grafana sends "SELECT FROM ..." while editing)
+	// Return empty result like native InfluxDB does
+	if len(q.fields) == 0 || q.measurement == "" {
+		return emptyResult(), nil
+	}
+
 	var sql string
 	if (q.hasLast || q.hasFirst) && len(q.groupByTags) > 0 && q.groupByTime == "" {
 		// UNION ALL with per-tag index lookup (avoids full sort)
@@ -703,8 +709,16 @@ func (c *Converter) buildSimpleSQL(q selectQuery) string {
 		sql.WriteString(fmt.Sprintf(" WHERE %s", where))
 	}
 
-	// ORDER BY for last/first
-	if q.hasLast {
+	// ORDER BY / GROUP BY logic
+	if q.groupByTime != "" {
+		// Group by time + optional tags (last/first are converted to TimescaleDB aggregates)
+		groupCols := []string{fmt.Sprintf("time_bucket('%s', time)", q.groupByTime)}
+		for _, tag := range q.groupByTags {
+			groupCols = append(groupCols, fmt.Sprintf(`"%s"`, tag))
+		}
+		sql.WriteString(fmt.Sprintf(" GROUP BY %s", strings.Join(groupCols, ", ")))
+		sql.WriteString(" ORDER BY time")
+	} else if q.hasLast {
 		orderCols := make([]string, 0)
 		for _, tag := range q.groupByTags {
 			orderCols = append(orderCols, fmt.Sprintf(`"%s"`, tag))
@@ -718,14 +732,6 @@ func (c *Converter) buildSimpleSQL(q selectQuery) string {
 		}
 		orderCols = append(orderCols, "time ASC")
 		sql.WriteString(fmt.Sprintf(" ORDER BY %s", strings.Join(orderCols, ", ")))
-	} else if q.groupByTime != "" {
-		// Group by time + optional tags
-		groupCols := []string{fmt.Sprintf("time_bucket('%s', time)", q.groupByTime)}
-		for _, tag := range q.groupByTags {
-			groupCols = append(groupCols, fmt.Sprintf(`"%s"`, tag))
-		}
-		sql.WriteString(fmt.Sprintf(" GROUP BY %s", strings.Join(groupCols, ", ")))
-		sql.WriteString(" ORDER BY time")
 	} else if len(q.groupByTags) > 0 && c.hasAggregation(q.fields) {
 		// Aggregation with tag GROUP BY but no time bucket
 		tagCols := make([]string, len(q.groupByTags))
@@ -808,17 +814,38 @@ func (c *Converter) convertField(field string, groupByTime string) string {
 	// Remove quotes around identifiers
 	f = strings.ReplaceAll(f, `"`, "")
 
-	// For last/first, just return the field name (DISTINCT ON handles it)
+	// For last/first
 	if reLast.MatchString(field) || reFirst.MatchString(field) {
-		// Extract: last("field") AS alias -> field AS alias
-		re := regexp.MustCompile(`(?i)(?:last|first)\s*\(\s*"?(\w+)"?\s*\)(?:\s+AS\s+(\w+))?`)
+		re := regexp.MustCompile(`(?i)(last|first)\s*\(\s*"?(\w+)"?\s*\)(?:\s+AS\s+(.+))?`)
 		if m := re.FindStringSubmatch(field); len(m) > 1 {
-			col := m[1]
-			alias := m[2]
+			funcName := m[1] // "last" or "first"
+			col := m[2]      // field name
+			alias := strings.TrimSpace(m[3])
+
+			if groupByTime != "" {
+				// With GROUP BY time, use TimescaleDB's last(val, time) / first(val, time)
+				sqlFunc := fmt.Sprintf(`%s("%s", time)`, funcName, col)
+				if alias != "" {
+					return fmt.Sprintf(`%s AS %s`, sqlFunc, alias)
+				}
+				return sqlFunc
+			}
+
+			// Without GROUP BY time, DISTINCT ON handles it
 			if alias != "" {
-				return fmt.Sprintf(`"%s" AS "%s"`, col, alias)
+				return fmt.Sprintf(`"%s" AS %s`, col, alias)
 			}
 			return fmt.Sprintf(`"%s"`, col)
+		}
+	}
+
+	// If there's a GROUP BY time but no aggregation function, wrap in last()
+	// InfluxDB allows raw fields with GROUP BY time, but PostgreSQL requires aggregation
+	// Check against f (after mean→avg replacement) to avoid false negatives
+	if groupByTime != "" {
+		reAgg := regexp.MustCompile(`(?i)\b(avg|sum|count|max|min|last|first|median|stddev|spread)\s*\(`)
+		if !reAgg.MatchString(f) {
+			return fmt.Sprintf("last(%s, time)", f)
 		}
 	}
 
@@ -871,6 +898,10 @@ func (c *Converter) convertWhere(where string) string {
 		return fmt.Sprintf("'%s'", time.UnixMilli(ms).UTC().Format(time.RFC3339))
 	})
 
+	// Remove InfluxDB type annotations: "region"::tag -> "region", region::tag -> region
+	reTypeAnnot := regexp.MustCompile(`("[\w]+"|\w+)::(?:tag|field)\b`)
+	w = reTypeAnnot.ReplaceAllString(w, "$1")
+
 	// Replace: time > now() - Xs -> time > NOW() - interval 'X seconds'
 	w = replaceTimeComparisons(w)
 
@@ -883,6 +914,13 @@ func (c *Converter) convertWhere(where string) string {
 func (c *Converter) executeAndFormat(sql string, measurement string, groupByTags []string, fieldAliases []string) (*InfluxDBResponse, error) {
 	rows, err := c.meta.pool.Query(c.meta.ctx, sql)
 	if err != nil {
+		errMsg := err.Error()
+		// Return empty result for "column does not exist" (Grafana placeholder fields like "value")
+		// and "relation does not exist" (querying before data is written)
+		if strings.Contains(errMsg, "does not exist") {
+			log.Printf("[QUERY] non-fatal error, returning empty result: %v", err)
+			return emptyResult(), nil
+		}
 		return nil, fmt.Errorf("SQL error: %w (sql: %s)", err, sql)
 	}
 	defer rows.Close()
