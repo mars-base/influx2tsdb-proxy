@@ -61,6 +61,8 @@ func (c *Converter) Convert(query string) (*InfluxDBResponse, error) {
 		return c.handleCreateDatabase(query), nil
 	case strings.HasPrefix(upper, "DROP DATABASE"):
 		return c.handleDropDatabase(query), nil
+	case strings.HasPrefix(upper, "DELETE"):
+		return c.handleDelete(query), nil
 	case strings.HasPrefix(upper, "SELECT"):
 		return c.handleSelect(query)
 	default:

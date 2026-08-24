@@ -256,3 +256,86 @@ func (c *Converter) handleDropMeasurement(query string) (*InfluxDBResponse, erro
 
 	return emptyResult(), nil
 }
+
+// handleDelete processes DELETE queries
+// Syntax: DELETE FROM <measurement> [WHERE <tag_key>='<tag_value>' | <time condition>]
+// Examples:
+//   DELETE FROM "server_online"                    -- delete all data
+//   DELETE FROM "server_online" WHERE time < '2025-01-01'  -- delete by time
+//   DELETE FROM "server_online" WHERE "region" = 'test'    -- delete by tag
+func (c *Converter) handleDelete(query string) *InfluxDBResponse {
+	upper := strings.ToUpper(query)
+	rest := strings.TrimSpace(query[len("DELETE"):])
+	upperRest := strings.TrimSpace(upper[len("DELETE"):])
+
+	// Must have FROM or WHERE
+	hasFrom := strings.HasPrefix(upperRest, "FROM")
+	hasWhere := strings.HasPrefix(upperRest, "WHERE")
+	if !hasFrom && !hasWhere {
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "DELETE requires FROM or WHERE clause"}}}
+	}
+
+	// Extract measurement from FROM clause
+	var measurement string
+	if hasFrom {
+		afterFrom := strings.TrimSpace(rest[4:]) // skip "FROM"
+		measurement = extractFirstToken(afterFrom)
+		if measurement == "" {
+			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: "missing measurement name"}}}
+		}
+	}
+
+	// Build SQL
+	var sql string
+	if measurement != "" {
+		// DELETE FROM "measurement" [WHERE ...]
+		sql = fmt.Sprintf(`DELETE FROM "%s"."%s"`, escapeIdent(c.dbName), escapeIdent(measurement))
+
+		// Extract WHERE clause if present
+		whereIdx := strings.Index(strings.ToUpper(rest), "WHERE")
+		if whereIdx >= 0 {
+			whereClause := strings.TrimSpace(rest[whereIdx+5:])
+			convertedWhere := c.convertWhere(whereClause)
+			if convertedWhere != "" {
+				sql += " WHERE " + convertedWhere
+			}
+		}
+	} else {
+		// DELETE WHERE ... (no FROM) — delete from all measurements in this database
+		// Get all measurements for this database
+		measurements, err := c.meta.GetMeasurements(c.dbName)
+		if err != nil {
+			return &InfluxDBResponse{Results: []InfluxDBResult{{Error: err.Error()}}}
+		}
+
+		whereIdx := strings.Index(strings.ToUpper(rest), "WHERE")
+		whereClause := ""
+		if whereIdx >= 0 {
+			whereClause = c.convertWhere(strings.TrimSpace(rest[whereIdx+5:]))
+		}
+
+		// Execute DELETE on each measurement
+		for _, m := range measurements {
+			delSQL := fmt.Sprintf(`DELETE FROM "%s"."%s"`, escapeIdent(c.dbName), escapeIdent(m))
+			if whereClause != "" {
+				delSQL += " WHERE " + whereClause
+			}
+			if _, err := c.meta.pool.Exec(c.meta.ctx, delSQL); err != nil {
+				log.Printf("[DELETE] warning: failed on %s: %v", m, err)
+			}
+		}
+		return emptyResult()
+	}
+
+	_, err := c.meta.pool.Exec(c.meta.ctx, sql)
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "does not exist") {
+			log.Printf("[DELETE] non-fatal: %v", err)
+			return emptyResult()
+		}
+		return &InfluxDBResponse{Results: []InfluxDBResult{{Error: fmt.Sprintf("DELETE failed: %s", errMsg)}}}
+	}
+
+	return emptyResult()
+}
