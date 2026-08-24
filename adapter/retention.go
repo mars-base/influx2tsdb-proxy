@@ -155,9 +155,12 @@ func (rs *RetentionStore) applyCompression(dbName, tableName string, tagColumns 
 		}
 	}
 
+	// Remove existing compression policy (if any) so we can re-apply with updated compress_after
+	rs.pool.Exec(rs.ctx, fmt.Sprintf("SELECT remove_compression_policy('%s')", fullName))
+
 	// Add automatic compression policy (compress data older than compress_after)
 	compressAfter := rs.DefaultCompressAfter(dbName)
-	policySQL := fmt.Sprintf(`SELECT add_compression_policy('%s', INTERVAL '%s', if_not_exists => true)`, fullName, compressAfter)
+	policySQL := fmt.Sprintf(`SELECT add_compression_policy('%s', INTERVAL '%s')`, fullName, compressAfter)
 	if _, err := rs.pool.Exec(rs.ctx, policySQL); err != nil {
 		log.Printf("Warning: add compression policy on %s: %v", fullName, err)
 	} else {
