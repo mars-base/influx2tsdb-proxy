@@ -59,6 +59,15 @@ DROP RP 15m cleanup|DROP RETENTION POLICY "test_min" ON "testdb"|results|contain
 CREATE RP 14m below minimum|CREATE RETENTION POLICY "test_short" ON "testdb" DURATION 14m REPLICATION 1|at least 15 minutes|contains
 
 # ============================================================
+# SHARD DURATION
+# ============================================================
+CREATE RP with SHARD DURATION 5m|CREATE RETENTION POLICY "test_shard" ON "testdb" DURATION 1d REPLICATION 1 SHARD DURATION 5m|results|contains
+SHOW RP after create has shard 5m|SHOW RETENTION POLICIES|5m0s|contains
+ALTER RP SHARD DURATION to 10m|ALTER RETENTION POLICY "test_shard" ON "testdb" SHARD DURATION 10m|results|contains
+SHOW RP after alter has shard 10m|SHOW RETENTION POLICIES|10m0s|contains
+DROP RP with shard|DROP RETENTION POLICY "test_shard" ON "testdb"|results|contains
+
+# ============================================================
 # Error handling
 # ============================================================
 Invalid query syntax returns error|SELECT FROM "${MEASUREMENT}"|error|contains

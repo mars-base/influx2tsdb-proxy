@@ -156,6 +156,19 @@ SELECT sum(val) FROM (
 - Retention < 1d：按公式计算（chunk 最小 1h，compress 最小 15m）
 - Retention 1d ~ 7d：chunk = retention / 24，compression = retention / 4
 - Retention > 7d：两者均封顶为 1 day
+- **SHARD DURATION**：显式指定 chunk 大小，覆盖自动计算
+
+**语法：**
+```sql
+-- 使用自动计算的 chunk
+CREATE RETENTION POLICY "keep_1d" ON "game_monitor" DURATION 1d REPLICATION 1 DEFAULT
+
+-- 显式指定 chunk 为 5 分钟
+CREATE RETENTION POLICY "keep_1d" ON "game_monitor" DURATION 1d REPLICATION 1 SHARD DURATION 5m DEFAULT
+
+-- 单独修改 chunk 大小
+ALTER RETENTION POLICY "keep_1d" ON "game_monitor" SHARD DURATION 10m
+```
 
 | Retention | Chunk | Compress |
 |-----------|-------|----------|
@@ -165,6 +178,7 @@ SELECT sum(val) FROM (
 | 7d | 7 hours | 42 hours |
 | > 7d | 1 day | 1 day |
 | INF | 1 day | 1 day |
+| 指定 SHARD DURATION | 用户指定值 | 自动计算 |
 
 ### 数据清理策略
 

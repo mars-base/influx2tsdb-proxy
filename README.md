@@ -106,7 +106,9 @@ Supports InfluxDB 1.x per-database retention policy CRUD. Each database maintain
 | InfluxQL | Description |
 |----------|-------------|
 | `CREATE RETENTION POLICY "rp_7d" ON "db" DURATION 7d REPLICATION 1 DEFAULT` | Create policy, set as default |
+| `CREATE RETENTION POLICY "rp_1d" ON "db" DURATION 1d REPLICATION 1 SHARD DURATION 5m DEFAULT` | Create with explicit chunk size |
 | `ALTER RETENTION POLICY "rp_7d" ON "db" DURATION 30d` | Modify duration |
+| `ALTER RETENTION POLICY "rp_7d" ON "db" SHARD DURATION 10m` | Modify chunk size |
 | `DROP RETENTION POLICY "rp_7d" ON "db"` | Delete policy |
 | `SHOW RETENTION POLICIES ON "db"` | List all policies |
 
@@ -131,6 +133,7 @@ CREATE RETENTION POLICY "autogen" ON "testdb" DURATION 30d REPLICATION 1 DEFAULT
 - `CREATE / ALTER / DROP` trigger immediate sync to TimescaleDB; a background sync runs every 5 minutes
 - Duration formats: `15m`, `1h`, `7d`, `30d`, `1w`, `INF` / `0s` (infinite = no retention)
 - **Minimum retention**: `15m` (15 minutes). Setting a shorter duration returns an error. `INF` (infinite) is always allowed
+- **SHARD DURATION**: Optional chunk size override (e.g., `SHARD DURATION 5m`). When specified, uses this value instead of auto-calculation
 - `DROP` removes TimescaleDB retention jobs when no default policy remains
 - Each database automatically gets an `autogen` policy on creation (matching InfluxDB behavior)
 
