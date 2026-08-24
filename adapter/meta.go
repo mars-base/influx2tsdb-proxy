@@ -391,6 +391,9 @@ func (m *MetaStore) EnsureTable(dbName, measurement string, tags map[string]stri
 		_, _ = m.pool.Exec(m.ctx,
 			fmt.Sprintf(`SELECT set_chunk_time_interval('"%s"."%s"', INTERVAL '%s')`,
 				schemaName, escapeIdent(measurement), chunkInterval))
+
+		// Apply columnar compression with tag columns as segmentby
+		m.retentionStore.applyCompression(dbName, measurement, schema.Tags)
 	}
 
 	return nil

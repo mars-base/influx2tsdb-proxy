@@ -133,6 +133,29 @@ CREATE RETENTION POLICY "autogen" ON "testdb" DURATION 30d REPLICATION 1 DEFAULT
 - `DROP` removes TimescaleDB retention jobs when no default policy remains
 - Each database automatically gets an `autogen` policy on creation (matching InfluxDB behavior)
 
+### Columnar Compression (TimescaleDB)
+
+Columnar compression is **enabled by default** on all hypertables. Compression provides 90%+ storage savings and faster aggregation queries.
+
+**Configuration:**
+- `compress_segmentby` — Uses tag columns (e.g., `server_id`, `region`) for optimal segment grouping
+- `compress_orderby` — `time DESC` for efficient time-series queries
+- `compress_after` — Auto-calculated from retention duration: `retention_duration / 4`
+
+**Auto-calculation examples:**
+
+| Retention Duration | compress_after | Reasoning |
+|---|---|---|
+| 7d | 1 day | 168h / 4 = 42h → 1 day |
+| 30d | 1 week | 720h / 4 = 180h → 1 week |
+| 90d | 2 weeks | 2160h / 4 = 540h → 2 weeks |
+| 365d | 5 weeks | 8760h / 4 = 2190h → 5 weeks |
+| INF (no retention) | 7 days | Default fallback |
+
+**When applied:**
+- New hypertables: compression applied immediately on creation (`EnsureTable`)
+- Existing hypertables: compression applied during retention sync (every 5 minutes)
+
 ## Subquery Example
 
 ```sql

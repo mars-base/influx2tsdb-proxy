@@ -30,6 +30,7 @@ type RetentionStore struct {
 	pool      *pgxpool.Pool
 	mu        sync.RWMutex
 	policies  map[string]*RetentionPolicy // "dbName/name" -> policy
+	metaStore *MetaStore                  // reference to MetaStore for tag column info
 	lastSync  time.Time
 	syncEvery time.Duration
 }
@@ -116,6 +117,54 @@ func (rs *RetentionStore) initialize() error {
 	}
 	log.Printf("Loaded %d retention policies", len(rs.policies))
 	return rows.Err()
+}
+
+// SetMetaStore links the MetaStore so we can access tag column information
+func (rs *RetentionStore) SetMetaStore(m *MetaStore) {
+	rs.metaStore = m
+}
+
+// applyCompression enables columnar compression on a hypertable
+// segmentby uses tag columns, orderby uses time DESC
+func (rs *RetentionStore) applyCompression(dbName, tableName string, tagColumns []string) error {
+	schemaName := escapeIdent(dbName)
+	fullName := fmt.Sprintf(`"%s"."%s"`, schemaName, escapeIdent(tableName))
+
+	// Build segmentby clause from tag columns
+	segmentby := ""
+	if len(tagColumns) > 0 {
+		quotedTags := make([]string, len(tagColumns))
+		for i, tag := range tagColumns {
+			quotedTags[i] = fmt.Sprintf(`"%s"`, escapeIdent(tag))
+		}
+		segmentby = strings.Join(quotedTags, ",")
+	}
+
+	// Enable compression with segmentby and orderby
+	compressSQL := fmt.Sprintf(`
+		ALTER TABLE %s SET (
+			timescaledb.compress,
+			timescaledb.compress_segmentby = '%s',
+			timescaledb.compress_orderby = 'time DESC'
+		)`, fullName, segmentby)
+
+	if _, err := rs.pool.Exec(rs.ctx, compressSQL); err != nil {
+		// Ignore if already enabled
+		if !strings.Contains(err.Error(), "already enabled") {
+			log.Printf("Warning: enable compression on %s: %v", fullName, err)
+		}
+	}
+
+	// Add automatic compression policy (compress data older than compress_after)
+	compressAfter := rs.DefaultCompressAfter(dbName)
+	policySQL := fmt.Sprintf(`SELECT add_compression_policy('%s', INTERVAL '%s', if_not_exists => true)`, fullName, compressAfter)
+	if _, err := rs.pool.Exec(rs.ctx, policySQL); err != nil {
+		log.Printf("Warning: add compression policy on %s: %v", fullName, err)
+	} else {
+		log.Printf("Applied compression policy: %s -> compress_after = %s", fullName, compressAfter)
+	}
+
+	return nil
 }
 
 // RunSyncLoop runs the background retention policy sync loop
@@ -458,6 +507,19 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 		} else {
 			log.Printf("Applied chunk_time_interval: %s -> %s", fullName, chunkInterval)
 		}
+
+		// Apply columnar compression
+		if rs.metaStore != nil {
+			key := dbMeasurementKey(dbName, htName)
+			rs.metaStore.mu.RLock()
+			schema := rs.metaStore.tables[key]
+			var tagCols []string
+			if schema != nil {
+				tagCols = schema.Tags
+			}
+			rs.metaStore.mu.RUnlock()
+			rs.applyCompression(dbName, htName, tagCols)
+		}
 	}
 
 	rs.lastSync = time.Now()
@@ -517,6 +579,52 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 		return "1 day"
 	default:
 		return "1 week"
+	}
+}
+
+// DefaultCompressAfter returns the compress_after interval based on the default
+// retention policy duration for a specific database.
+// Uses retention_duration / 4 as the compression delay.
+// Returns "7 days" if no policy is set.
+func (rs *RetentionStore) DefaultCompressAfter(dbName string) string {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+
+	var defaultPolicy *RetentionPolicy
+	for _, rp := range rs.policies {
+		if rp.DBName == dbName && rp.IsDefault {
+			defaultPolicy = rp
+			break
+		}
+	}
+	if defaultPolicy == nil {
+		for _, rp := range rs.policies {
+			if rp.DBName == dbName && rp.DurationNs > 0 {
+				defaultPolicy = rp
+				break
+			}
+		}
+	}
+
+	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
+		return "7 days"
+	}
+
+	// compress_after = retention_duration / 4
+	hours := defaultPolicy.DurationNs / int64(time.Hour)
+	compressHours := hours / 4
+
+	switch {
+	case compressHours < 1:
+		return "15 minutes"
+	case compressHours < 24:
+		return fmt.Sprintf("%d hours", compressHours)
+	case compressHours < 168: // < 7 days
+		days := compressHours / 24
+		return fmt.Sprintf("%d days", days)
+	default:
+		weeks := compressHours / 168
+		return fmt.Sprintf("%d weeks", weeks)
 	}
 }
 

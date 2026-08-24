@@ -127,6 +127,7 @@ func main() {
 	retentionStore.EnsureDatabasePolicies(influxDBName)
 	// Link retention store to meta store for chunk_time_interval
 	meta.SetRetentionStore(retentionStore)
+	retentionStore.SetMetaStore(meta)
 	// Initial sync of retention policies to TimescaleDB
 	if err := retentionStore.SyncToTimescaleDB(influxDBName); err != nil {
 		log.Printf("Warning: initial retention sync failed: %v", err)
