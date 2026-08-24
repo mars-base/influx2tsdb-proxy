@@ -256,6 +256,12 @@ func (rs *RetentionStore) CreatePolicy(dbName, name, duration string, isDefault 
 		return fmt.Errorf("invalid duration %q: %w", duration, err)
 	}
 
+	// Enforce minimum retention: 15 minutes (skip check for INF = 0)
+	const minRetentionNs = 15 * int64(time.Minute)
+	if durationNs > 0 && durationNs < minRetentionNs {
+		return fmt.Errorf("retention duration must be at least 15 minutes, got %s", duration)
+	}
+
 	// If is_default is true, clear other defaults for this database
 	if isDefault {
 		if _, err := rs.pool.Exec(rs.ctx,
@@ -334,6 +340,12 @@ func (rs *RetentionStore) AlterPolicy(dbName, name, duration string) error {
 	durationNs, err := parseDuration(duration)
 	if err != nil {
 		return fmt.Errorf("invalid duration %q: %w", duration, err)
+	}
+
+	// Enforce minimum retention: 15 minutes (skip check for INF = 0)
+	const minRetentionNs = 15 * int64(time.Minute)
+	if durationNs > 0 && durationNs < minRetentionNs {
+		return fmt.Errorf("retention duration must be at least 15 minutes, got %s", duration)
 	}
 
 	// Update

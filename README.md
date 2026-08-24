@@ -129,9 +129,34 @@ CREATE RETENTION POLICY "autogen" ON "testdb" DURATION 30d REPLICATION 1 DEFAULT
 - Policies are stored in the `_retention_policy` metadata table with `db_name` as part of the composite key
 - The **default** policy is applied to all hypertables within that database's schema
 - `CREATE / ALTER / DROP` trigger immediate sync to TimescaleDB; a background sync runs every 5 minutes
-- Duration formats: `7d`, `168h`, `30d`, `1w`, `INF` / `0s` (infinite = no retention)
+- Duration formats: `15m`, `1h`, `7d`, `30d`, `1w`, `INF` / `0s` (infinite = no retention)
+- **Minimum retention**: `15m` (15 minutes). Setting a shorter duration returns an error. `INF` (infinite) is always allowed
 - `DROP` removes TimescaleDB retention jobs when no default policy remains
 - Each database automatically gets an `autogen` policy on creation (matching InfluxDB behavior)
+
+### Data Cleanup Strategy
+
+Retention policy is the **recommended way** to clean up time-series data. TimescaleDB implements it as `DROP chunk` — deleting entire file blocks rather than row-by-row — making it extremely fast with near-zero overhead.
+
+| Method | Mechanism | Performance |
+|--------|-----------|-------------|
+| **Retention policy** (recommended) | Auto `DROP chunk` (delete whole file blocks) | Very fast, near-zero overhead |
+| Manual `DELETE` | Row-by-row tombstone, requires `VACUUM` to reclaim space | Slow, generates dead tuples |
+| `TRUNCATE` | Clear entire table | Cannot filter by time |
+
+**Per-database cleanup** (affects all measurements in the database):
+```sql
+-- Keep only last 1 day of data
+CREATE RETENTION POLICY "keep_1d" ON "game_monitor" DURATION 1d REPLICATION 1 DEFAULT
+```
+
+**Per-measurement cleanup** (single table, manual operation):
+```sql
+-- Only drop data older than 1 day from a specific table
+SELECT drop_chunks('"game_monitor"."server_online"', older_than => INTERVAL '1 day');
+```
+
+**Chunk-level granularity**: retention cleanup operates on chunks. If `chunk_time_interval` is 1 day, data may be retained up to 1 extra day (a chunk is dropped only when fully expired). For finer cleanup precision, use a shorter chunk interval.
 
 ### Columnar Compression (TimescaleDB)
 
