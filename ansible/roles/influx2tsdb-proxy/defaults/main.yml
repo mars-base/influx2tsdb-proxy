@@ -1,38 +1,36 @@
 ---
 # influx2tsdb-proxy Ansible role 默认配置
 
-# GitHub Release 版本
-influx2tsdb_proxy_version: "v1.0.1"
+# GitHub Release 版本（latest 或具体 tag 如 v1.0.1）
+influx2tsdb_proxy_version: "latest"
 
 # 二进制文件下载 URL
-# 注意：GitHub Release URL 格式为 /releases/download/<tag>/<filename>
-influx2tsdb_proxy_binary_url: "https://github.com/mars-base/influx2tsdb-proxy/releases/download/{{ influx2tsdb_proxy_version }}/influx2tsdb-proxy-linux-amd64"
+# latest 格式: /releases/latest/download/<filename>
+# 指定版本格式: /releases/download/<tag>/<filename>
+influx2tsdb_proxy_binary_url: >-
+  https://github.com/mars-base/influx2tsdb-proxy/releases/{{ 'latest/download' if influx2tsdb_proxy_version == 'latest' else 'download/' + influx2tsdb_proxy_version }}/influx2tsdb-proxy-linux-amd64
 
-# 安装目录（默认不设置，由 task 自动计算为 /opt/influx2tsdb-proxy-<instance_name>）
-# influx2tsdb_proxy_dir: "/opt/influx2tsdb-proxy"
-
-# 监听端口（默认不设置，由 task 自动计算为 8086 + index）
-# influx2tsdb_proxy_port: 8086
-
-# 连接池大小
-influx2tsdb_proxy_pool_size: 10
-
-# 是否启用 verbose 模式
-influx2tsdb_proxy_verbose: false
-
-# Supervisor 配置
-influx2tsdb_proxy_supervisor_autorestart: true
-influx2tsdb_proxy_supervisor_autostart: true
-influx2tsdb_proxy_supervisor_user: root
-influx2tsdb_proxy_supervisor_startsecs: 3
-influx2tsdb_proxy_supervisor_startretries: 3
-
-# 实例列表（支持单机多实例）
-influx2tsdb_proxy_instances:
-  - name: default
-    pg_dsn: "postgres://user:pass@localhost:5432/tsdb?sslmode=disable"
-    # influx_db: game_monitor                 # 可选，InfluxDB 对外数据库名，不设置则使用 name
-    # dir: /opt/influx2tsdb-proxy-default  # 可选，不设置则自动计算
-    # port: 8086                            # 可选，不设置则自动计算
-    # pool_size: 20                         # 可选，覆盖默认值
-    # verbose: true                         # 可选，覆盖默认值
+# 实例列表（必须在 host_vars 或 group_vars 中覆盖）
+# 每个实例支持的参数：
+#   name       - 实例名称（必需，用于目录名、supervisor 进程名）
+#   pg_dsn     - PostgreSQL/TimescaleDB 连接字符串（必需）
+#   db         - InfluxDB 数据库名（必需，InfluxDB API 请求的 db 参数）
+#   port       - HTTP 监听端口（必需）
+#   pool_size  - 连接池大小（可选，默认 10）
+#   verbose    - 启用 SQL 和查询详细日志（可选，默认 false）
+#   dir        - 安装目录（可选，默认 /srv/influx2tsdb-proxy-<name>）
+influx2tsdb_proxy_instances: []
+# 多实例示例：
+# influx2tsdb_proxy_instances:
+#   - name: game
+#     pg_dsn: "postgres://dba:pass@10.241.21.97:5433/tsdb?sslmode=disable"
+#     db: game_monitor
+#     port: 8087
+#     pool_size: 20
+#     verbose: true
+#   - name: monitor
+#     pg_dsn: "postgres://dba:pass@10.241.21.97:5433/monitor_tsdb?sslmode=disable"
+#     db: server_metrics
+#     port: 8089
+#     pool_size: 10
+#     verbose: false

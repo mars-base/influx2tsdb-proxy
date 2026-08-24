@@ -1,7 +1,7 @@
 [program:influx2tsdb-proxy-{{ item.name }}]
 autorestart = {{ item.supervisor_autorestart | default(true) | lower }}
 autostart = {{ item.supervisor_autostart | default(true) | lower }}
-command = /usr/local/bin/influx2tsdb-proxy -pg "{{ item.pg_dsn }}" -db {{ item.influx_db | default(item.name) }} -port {{ item.port }} -pool {{ item.pool_size | default(10) }}{% if item.verbose | default(false) %} -verbose{% endif %}
+command = /usr/local/bin/influx2tsdb-proxy -pg "{{ item.pg_dsn }}" -db {{ item.db }} -port {{ item.port }} -pool {{ item.pool_size | default(10) }}{% if item.verbose | default(false) %} -verbose{% endif %}
 
 directory = {{ item.dir | default('/srv/influx2tsdb-proxy-' + item.name) }}
 redirect_stderr = false
