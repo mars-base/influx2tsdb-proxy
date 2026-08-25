@@ -6,12 +6,32 @@
   when: ansible_os_family == "Debian"
   tags: [install]
 
+- name: Get current binary checksum
+  ansible.builtin.stat:
+    path: /usr/local/bin/influx2tsdb-proxy
+    checksum_algorithm: sha256
+  register: _binary_before
+  tags: [install, update]
+
 - name: Ensure influx2tsdb-proxy binary exists
   ansible.builtin.get_url:
     url: "{{ influx2tsdb_proxy_binary_url }}"
     dest: /usr/local/bin/influx2tsdb-proxy
     mode: '0755'
     force: yes
+  register: _binary_download
+  tags: [install, update]
+
+- name: Get new binary checksum
+  ansible.builtin.stat:
+    path: /usr/local/bin/influx2tsdb-proxy
+    checksum_algorithm: sha256
+  register: _binary_after
+  tags: [install, update]
+
+- name: Set binary changed fact
+  ansible.builtin.set_fact:
+    _binary_changed: "{{ _binary_before.stat.checksum | default('') != _binary_after.stat.checksum }}"
   tags: [install, update]
 
 - name: Find existing supervisor configurations
@@ -61,14 +81,14 @@
   register: _template_results
   tags: [config, update]
 
-- name: Reload supervisor and restart changed instances
+- name: Reload supervisor and restart instances when binary or config changed
   ansible.builtin.shell: |
     supervisorctl reread
     supervisorctl update
     {% for result in _template_results.results %}
-    {% if result.changed %}
+    {% if result.changed or _binary_changed %}
     supervisorctl restart influx2tsdb-proxy-{{ result.item.name }} || supervisorctl start influx2tsdb-proxy-{{ result.item.name }}
     {% endif %}
     {% endfor %}
-  when: _template_results.results | selectattr('changed') | list | length > 0
+  when: _template_results.results | selectattr('changed') | list | length > 0 or _binary_changed
   tags: [config, update]
