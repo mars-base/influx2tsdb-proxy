@@ -187,7 +187,7 @@ func (rs *RetentionStore) applyCompression(dbName, tableName string, tagColumns 
 	}
 
 	// Remove existing compression policy (if any) so we can re-apply with updated compress_after
-	rs.syncPool.Exec(ctx, fmt.Sprintf("SELECT remove_compression_policy('%s')", fullName))
+	rs.syncPool.Exec(ctx, fmt.Sprintf("SELECT remove_compression_policy('%s', if_exists => true)", fullName))
 
 	// Add automatic compression policy (compress data older than compress_after)
 	compressAfter := rs.DefaultCompressAfter(dbName)
@@ -570,7 +570,7 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 
 		// Remove existing retention policy (if any)
 		_, _ = rs.syncPool.Exec(ctx,
-			fmt.Sprintf("SELECT remove_retention_policy('%s')", fullName))
+			fmt.Sprintf("SELECT remove_retention_policy('%s', if_exists => true)", fullName))
 
 		// Apply default policy if it exists and has a valid duration
 		if defaultPolicy != nil && defaultPolicy.DurationNs > 0 {
@@ -579,7 +579,7 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 			scheduleInterval := rs.retentionScheduleInterval()
 
 			_, err = rs.syncPool.Exec(ctx,
-				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', schedule_interval => INTERVAL '%s', if_not_exists => true)", fullName, interval, scheduleInterval))
+				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', schedule_interval => INTERVAL '%s')", fullName, interval, scheduleInterval))
 			if err != nil {
 				if isTimeoutOrLock(err) {
 					log.Printf("Skipping retention policy on %s: lock timeout (will retry next sync)", fullName)
