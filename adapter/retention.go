@@ -576,9 +576,10 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 		if defaultPolicy != nil && defaultPolicy.DurationNs > 0 {
 			durationSec := defaultPolicy.DurationNs / int64(time.Second)
 			interval := fmt.Sprintf("%d seconds", durationSec)
+			scheduleInterval := rs.compressionScheduleInterval()
 
 			_, err = rs.syncPool.Exec(ctx,
-				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', if_not_exists => true)", fullName, interval))
+				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', schedule_interval => INTERVAL '%s', if_not_exists => true)", fullName, interval, scheduleInterval))
 			if err != nil {
 				if isTimeoutOrLock(err) {
 					log.Printf("Skipping retention policy on %s: lock timeout (will retry next sync)", fullName)
