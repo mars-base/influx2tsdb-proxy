@@ -54,6 +54,7 @@ func main() {
 		log.Fatalf("Failed to parse pool config: %v", err)
 	}
 	poolConfig.MaxConns = int32(*poolSize)
+	poolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "30000" // 30s lock wait max, prevents indefinite blocking
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
@@ -123,6 +124,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize retention store: %v", err)
 	}
+
+	// Create a dedicated connection pool for background DDL sync operations.
+	// This prevents DDL lock waiting (ALTER TABLE, add_compression_policy)
+	// from exhausting the shared query pool and making the proxy unresponsive.
+	syncPoolConfig, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		log.Fatalf("Failed to parse sync pool config: %v", err)
+	}
+	syncPoolConfig.MaxConns = 2 // only used by the background sync goroutine
+	syncPoolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "30000" // 30s lock wait max
+	syncPool, err := pgxpool.NewWithConfig(ctx, syncPoolConfig)
+	if err != nil {
+		log.Fatalf("Failed to create sync pool: %v", err)
+	}
+	defer syncPool.Close()
+	retentionStore.SetSyncPool(syncPool)
+	log.Println("Dedicated sync pool created (2 connections, lock_timeout=30s)")
+
 	// Ensure default database has retention policies
 	retentionStore.EnsureDatabasePolicies(influxDBName)
 	// Link retention store to meta store for chunk_time_interval

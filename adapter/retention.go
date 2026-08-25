@@ -29,6 +29,7 @@ type RetentionPolicy struct {
 type RetentionStore struct {
 	ctx       context.Context
 	pool      *pgxpool.Pool
+	syncPool  *pgxpool.Pool // dedicated pool for background sync DDL (isolated from query pool)
 	mu        sync.RWMutex
 	policies  map[string]*RetentionPolicy // "dbName/name" -> policy
 	metaStore *MetaStore                  // reference to MetaStore for tag column info
@@ -46,6 +47,7 @@ func NewRetentionStore(ctx context.Context, pool *pgxpool.Pool) (*RetentionStore
 	rs := &RetentionStore{
 		ctx:       ctx,
 		pool:      pool,
+		syncPool:  pool, // fallback to shared pool; call SetSyncPool() to isolate
 		policies:  make(map[string]*RetentionPolicy),
 		syncEvery: 5 * time.Minute,
 	}
@@ -55,6 +57,18 @@ func NewRetentionStore(ctx context.Context, pool *pgxpool.Pool) (*RetentionStore
 	}
 
 	return rs, nil
+}
+
+// SetSyncPool assigns a dedicated connection pool for background DDL sync operations.
+// This prevents DDL lock waiting from exhausting the shared query pool.
+func (rs *RetentionStore) SetSyncPool(p *pgxpool.Pool) {
+	rs.syncPool = p
+}
+
+// syncTimeout returns a context with a timeout for DDL sync operations.
+// Prevents indefinite lock waiting on TimescaleDB chunk locks.
+func (rs *RetentionStore) syncTimeout() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(rs.ctx, 30*time.Second)
 }
 
 // initialize creates the _retention_policy table and loads existing policies
@@ -139,6 +153,9 @@ func (rs *RetentionStore) SetMetaStore(m *MetaStore) {
 // applyCompression enables columnar compression on a hypertable
 // segmentby uses tag columns, orderby uses time DESC
 func (rs *RetentionStore) applyCompression(dbName, tableName string, tagColumns []string) error {
+	ctx, cancel := rs.syncTimeout()
+	defer cancel()
+
 	schemaName := escapeIdent(dbName)
 	fullName := fmt.Sprintf(`"%s"."%s"`, schemaName, escapeIdent(tableName))
 
@@ -160,23 +177,29 @@ func (rs *RetentionStore) applyCompression(dbName, tableName string, tagColumns 
 			timescaledb.compress_orderby = 'time DESC'
 		)`, fullName, segmentby)
 
-	if _, err := rs.pool.Exec(rs.ctx, compressSQL); err != nil {
+	if _, err := rs.syncPool.Exec(ctx, compressSQL); err != nil {
 		// Ignore if already enabled
-		if !strings.Contains(err.Error(), "already enabled") {
+		if !strings.Contains(err.Error(), "already enabled") && !isTimeoutOrLock(err) {
 			log.Printf("Warning: enable compression on %s: %v", fullName, err)
+		} else if isTimeoutOrLock(err) {
+			log.Printf("Skipping compression on %s: lock timeout (will retry next sync)", fullName)
 		}
 	}
 
 	// Remove existing compression policy (if any) so we can re-apply with updated compress_after
-	rs.pool.Exec(rs.ctx, fmt.Sprintf("SELECT remove_compression_policy('%s')", fullName))
+	rs.syncPool.Exec(ctx, fmt.Sprintf("SELECT remove_compression_policy('%s')", fullName))
 
 	// Add automatic compression policy (compress data older than compress_after)
 	compressAfter := rs.DefaultCompressAfter(dbName)
 	scheduleInterval := rs.compressionScheduleInterval()
 	policySQL := fmt.Sprintf(`SELECT add_compression_policy('%s', INTERVAL '%s', schedule_interval => INTERVAL '%s')`,
 		fullName, compressAfter, scheduleInterval)
-	if _, err := rs.pool.Exec(rs.ctx, policySQL); err != nil {
-		log.Printf("Warning: add compression policy on %s: %v", fullName, err)
+	if _, err := rs.syncPool.Exec(ctx, policySQL); err != nil {
+		if isTimeoutOrLock(err) {
+			log.Printf("Skipping compression policy on %s: lock timeout (will retry next sync)", fullName)
+		} else {
+			log.Printf("Warning: add compression policy on %s: %v", fullName, err)
+		}
 	} else {
 		log.Printf("Applied compression policy: %s -> compress_after = %s, schedule = %s", fullName, compressAfter, scheduleInterval)
 	}
@@ -483,6 +506,9 @@ func (rs *RetentionStore) ShowPolicies(dbName string) []RetentionPolicy {
 
 // SyncToTimescaleDB applies the default retention policy to all hypertables in a database schema.
 func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
+	ctx, cancel := rs.syncTimeout()
+	defer cancel()
+
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
@@ -504,9 +530,13 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 	}
 
 	// Get all hypertables in the specified schema
-	rows, err := rs.pool.Query(rs.ctx,
+	rows, err := rs.syncPool.Query(ctx,
 		"SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = $1", dbName)
 	if err != nil {
+		if isTimeoutOrLock(err) {
+			log.Printf("Skipping retention sync for %s: timeout/lock error (will retry next cycle)", dbName)
+			return nil
+		}
 		return fmt.Errorf("query hypertables: %w", err)
 	}
 	defer rows.Close()
@@ -525,13 +555,21 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 	}
 	rows.Close()
 
-	log.Printf("Syncing retention policies to %d hypertables in schema %s...", len(hypertables), dbName)
+	if len(hypertables) > 0 {
+		log.Printf("Syncing retention policies to %d hypertables in schema %s...", len(hypertables), dbName)
+	}
 
 	for _, htName := range hypertables {
+		// Check context deadline before each DDL operation
+		if ctx.Err() != nil {
+			log.Printf("Retention sync for %s: timeout reached, remaining tables will sync next cycle", dbName)
+			break
+		}
+
 		fullName := fmt.Sprintf(`"%s"."%s"`, escapeIdent(dbName), escapeIdent(htName))
 
 		// Remove existing retention policy (if any)
-		_, _ = rs.pool.Exec(rs.ctx,
+		_, _ = rs.syncPool.Exec(ctx,
 			fmt.Sprintf("SELECT remove_retention_policy('%s')", fullName))
 
 		// Apply default policy if it exists and has a valid duration
@@ -539,9 +577,13 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 			durationSec := defaultPolicy.DurationNs / int64(time.Second)
 			interval := fmt.Sprintf("%d seconds", durationSec)
 
-			_, err = rs.pool.Exec(rs.ctx,
+			_, err = rs.syncPool.Exec(ctx,
 				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', if_not_exists => true)", fullName, interval))
 			if err != nil {
+				if isTimeoutOrLock(err) {
+					log.Printf("Skipping retention policy on %s: lock timeout (will retry next sync)", fullName)
+					break
+				}
 				log.Printf("Add retention policy for %s: %v", fullName, err)
 				continue
 			}
@@ -550,10 +592,12 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 
 		// Sync chunk_time_interval to match shardGroupDuration
 		chunkInterval := rs.DefaultChunkInterval(dbName)
-		_, err = rs.pool.Exec(rs.ctx,
+		_, err = rs.syncPool.Exec(ctx,
 			fmt.Sprintf("SELECT set_chunk_time_interval('%s', INTERVAL '%s')", fullName, chunkInterval))
 		if err != nil {
-			log.Printf("Set chunk_time_interval for %s: %v", fullName, err)
+			if !isTimeoutOrLock(err) {
+				log.Printf("Set chunk_time_interval for %s: %v", fullName, err)
+			}
 		} else {
 			log.Printf("Applied chunk_time_interval: %s -> %s", fullName, chunkInterval)
 		}
@@ -742,6 +786,34 @@ func (rs *RetentionStore) DefaultCompressAfter(dbName string) string {
 	default:
 		return fmt.Sprintf("%d hours", compressAfter)
 	}
+}
+
+// isTimeoutOrLock returns true if the error is a context timeout, cancellation,
+// or PostgreSQL lock-related error (lock_timeout, deadlock_detected, etc.).
+// These errors indicate the DDL operation is waiting on chunk locks held by
+// TimescaleDB background jobs — safe to skip and retry next sync cycle.
+func isTimeoutOrLock(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// context timeout or cancellation
+	if context.DeadlineExceeded != nil && err == context.DeadlineExceeded {
+		return true
+	}
+	if context.Canceled != nil && err == context.Canceled {
+		return true
+	}
+	// PostgreSQL lock errors: 55P03 (lock_not_available), 40P01 (deadlock_detected)
+	// Also match common substrings from pgx error messages
+	return strings.Contains(msg, "lock timeout") ||
+		strings.Contains(msg, "could not obtain lock") ||
+		strings.Contains(msg, "lock_not_available") ||
+		strings.Contains(msg, "deadlock detected") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "55P03") ||
+		strings.Contains(msg, "40P01")
 }
 
 // parseDuration parses InfluxDB duration format to nanoseconds
