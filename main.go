@@ -14,6 +14,7 @@ import (
 
 	"influxdb-tsdb-proxy/adapter"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -54,7 +55,10 @@ func main() {
 		log.Fatalf("Failed to parse pool config: %v", err)
 	}
 	poolConfig.MaxConns = int32(*poolSize)
-	poolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "30000" // 30s lock wait max, prevents indefinite blocking
+	poolConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET lock_timeout = '30s'")
+		return err
+	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
@@ -133,7 +137,10 @@ func main() {
 		log.Fatalf("Failed to parse sync pool config: %v", err)
 	}
 	syncPoolConfig.MaxConns = 2 // only used by the background sync goroutine
-	syncPoolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "30000" // 30s lock wait max
+	syncPoolConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET lock_timeout = '30s'")
+		return err
+	}
 	syncPool, err := pgxpool.NewWithConfig(ctx, syncPoolConfig)
 	if err != nil {
 		log.Fatalf("Failed to create sync pool: %v", err)
