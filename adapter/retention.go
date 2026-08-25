@@ -576,7 +576,7 @@ func (rs *RetentionStore) SyncToTimescaleDB(dbName string) error {
 		if defaultPolicy != nil && defaultPolicy.DurationNs > 0 {
 			durationSec := defaultPolicy.DurationNs / int64(time.Second)
 			interval := fmt.Sprintf("%d seconds", durationSec)
-			scheduleInterval := rs.compressionScheduleInterval()
+			scheduleInterval := rs.retentionScheduleInterval()
 
 			_, err = rs.syncPool.Exec(ctx,
 				fmt.Sprintf("SELECT add_retention_policy('%s', INTERVAL '%s', schedule_interval => INTERVAL '%s', if_not_exists => true)", fullName, interval, scheduleInterval))
@@ -686,6 +686,31 @@ func (rs *RetentionStore) DefaultChunkInterval(dbName string) string {
 		return "1 hour"
 	}
 	return fmt.Sprintf("%d hours", chunkHours)
+}
+
+// retentionScheduleInterval returns how often the background retention job runs.
+// For short retention (< 1d), run every 5 minutes; otherwise every 1 hour.
+func (rs *RetentionStore) retentionScheduleInterval() string {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+
+	var defaultPolicy *RetentionPolicy
+	for _, rp := range rs.policies {
+		if rp.DBName != "" && (rp.IsDefault || rp.DurationNs > 0) {
+			if defaultPolicy == nil || rp.IsDefault {
+				defaultPolicy = rp
+			}
+		}
+	}
+	if defaultPolicy == nil || defaultPolicy.DurationNs == 0 {
+		return "1 hour"
+	}
+
+	hours := defaultPolicy.DurationNs / int64(time.Hour)
+	if hours < 24 {
+		return "5 minutes"
+	}
+	return "1 hour"
 }
 
 // compressionScheduleInterval returns how often the background compression job runs.
